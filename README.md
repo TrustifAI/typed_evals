@@ -29,9 +29,9 @@ after installing the fitting dependency with `pip install '.[calibration]'`.
 from typed_evals import evaluate
 
 result = evaluate(
-    input="What is the refund period?", #your query
-    response="You can request a refund within 30 days.", #Response from your LLM
-    contexts=["Refunds are allowed within 30 days of purchase."], #context used for query
+    input="What is the refund period?",  # your query
+    response="You can request a refund within 30 days.",  # Response from your LLM
+    contexts=["Refunds are allowed within 30 days of purchase."],  # context used for query
     preset="rag",
 )
 
