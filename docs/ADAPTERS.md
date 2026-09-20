@@ -15,7 +15,7 @@ pip install '.[agent-framework]'
 
 The new integrations are tested against CrewAI 1.15.22 and
 `agent-framework-core` 1.19.0. CrewAI currently supports Python below 3.14;
-the CI matrix covers Python 3.11–3.14. Framework dependencies remain optional.
+the CI matrix covers Python 3.11–3.13. Framework dependencies remain optional.
 
 ## LangChain
 
