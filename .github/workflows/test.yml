@@ -1,0 +1,22 @@
+name: tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install -e '.[calibration,dev,langchain,crewai,agent-framework]'
+      - run: python -c "import langchain, crewai, agent_framework"
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest --cov=typed_evals --cov-report=term-missing
+      - run: python -m build

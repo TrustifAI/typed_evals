@@ -1,0 +1,3 @@
+{"sample":{"id":"c1","input":"Where is the office?","response":"The office is in Paris.","contexts":["The office address is in Paris."]},"labels":{"faithfulness":1,"answer_relevancy":1}}
+{"sample":{"id":"c2","input":"Where is the office?","response":"The office is in Berlin.","contexts":["The office address is in Paris."]},"labels":{"faithfulness":0,"answer_relevancy":1}}
+{"sample":{"id":"c3","input":"When does support open?","response":"The office is in Paris.","contexts":["The office address is in Paris. Support opens at nine in the morning."]},"labels":{"faithfulness":1,"answer_relevancy":0}}

@@ -1,0 +1,3 @@
+{"id":"supported example","input":"What is the refund period?","response":"Refunds can be requested within 30 days of purchase.","contexts":["Customers may request a refund within 30 days of purchase."],"reference":"The refund period is 30 days from purchase."}
+{"id":"unsupported example","input":"What is the refund period?","response":"Refunds are available for 90 days.","contexts":["Customers may request a refund within 30 days of purchase."],"reference":"The refund period is 30 days from purchase."}
+{"id":"irrelevant example","input":"What is the refund period?","response":"The company sells blue and green backpacks.","contexts":["Customers may request a refund within 30 days of purchase."],"reference":"The refund period is 30 days from purchase."}

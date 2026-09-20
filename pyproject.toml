@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "typed_evals"
+version = "0.1.0"
+description = "Evaluation for LLM and agents using Jev, with opt-in isotonic calibration."
+readme = "README.md"
+authors = [
+    { name = "Aaryan Verma" }
+]
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = ["typesafe-sdk>=0.7.0,<0.8", "pydantic>=2.12,<3"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Author = "https://github.com/Aaryanverma"
+
+[project.optional-dependencies]
+calibration = ["scikit-learn>=1.4,<2"]
+langchain = ["langchain>=1,<2"]
+crewai = ["crewai>=1.15.22,<2"]
+agent-framework = ["agent-framework-core>=1.19,<2"]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2", "pytest-cov>=5,<8", "ruff>=0.9", "build>=1.2"]
+
+[project.scripts]
+typed_evals = "typed_evals.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["typed_evals", "typed_evals.*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+typed_evals = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = ["live: opt-in paid Jev API smoke tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.coverage.run]
+source = ["typed_evals"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
