@@ -1,4 +1,4 @@
-# typed_evals
+# Typed Evals
 
 Evaluate LLM responses, RAG datasets, and recorded agent executions using System One Models like **[Jev](https://typesafe.ai/)** as the judge. Guard tools before they execute.
 Optionally calibrate individual metrics against human pass/fail labels.
