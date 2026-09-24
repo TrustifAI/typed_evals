@@ -14,6 +14,7 @@
 
 <p align="center">
   <a href="#quickstart">Quickstart</a> ·
+  <a href="#evaluate-agent-execution">Agent evaluation</a> ·
   <a href="#guard-tool-calls">Tool guards</a> ·
   <a href="#calibration">Calibration</a> ·
   <a href="#examples-and-guides">Examples &amp; guides</a>
@@ -59,12 +60,11 @@ That checks **faithfulness**, **answer relevancy**, and **context relevance** in
 
 | Your workflow | What Typed Evals provides |
 | --- | --- |
-| **Evaluate a RAG pipeline** | Check whether answers address the query and stay grounded in the retrieved context. |
-| **Review agent runs** | Judge task completion and claims about tool results against recorded execution evidence. |
-| **Guard tool calls** | Evaluate proposed calls against your policy before executing the underlying function. |
-| **Run dataset checks** | Evaluate JSON, JSONL, or Python samples; export structured reports and use the CLI in CI. |
-| **Define your own rubric** | Compose nine built-in metrics or write custom binary, categorical, and ordered-score checks. |
-| **Calibrate thresholds** | Fit per-metric curves to human pass/fail labels and inspect performance on held-out data. |
+| **[Evaluate a RAG pipeline](#quickstart)** | Check whether answers address the query and stay grounded in the retrieved context. |
+| **[Evaluate Agent runs](#evaluate-agent-execution)** | Judge task completion and claims about tool results against recorded execution evidence. |
+| **[Guard tool calls](#guard-tool-calls)** | Evaluate proposed calls against your policy before executing the underlying function. |
+| **[Define your own rubric](#write-a-custom-metric)** | Compose nine built-in metrics or write custom binary, categorical, and ordered-score checks. |
+| **[Calibrate thresholds](#calibration)** | Fit per-metric curves to human pass/fail labels and inspect performance on held-out data. |
 
 ### Choose a preset
 
@@ -75,6 +75,40 @@ That checks **faithfulness**, **answer relevancy**, and **context relevance** in
 | `"agent"` | Task completion, tool grounding | `input`, `response`, `trace`, `expected_outcome` |
 
 Presets use a `0.5` threshold for each metric. **Supplying contexts alone does not enable RAG checks**—choose `preset="rag"` explicitly. Missing evidence and judge errors raise by default. Use custom metrics to choose different checks or thresholds.
+
+## Evaluate agent execution
+
+Use `preset="agent"` to check whether a completed run achieved its expected outcome and reported tool results accurately. Supply the final response, observed execution trace, and explicit success criteria:
+
+```python
+from typed_evals import evaluate
+
+result = evaluate(
+    preset="agent",
+    input="Create a support ticket for the export failure.",
+    response="I created ticket T-42 for your export failure.",
+    expected_outcome="A new support ticket exists for the reported export failure.",
+    trace=[
+        {
+            "name": "create_ticket",
+            "arguments": {"title": "Export failure"},
+            "status": "error",
+            "output": {"created": False},
+            "error": "Permission denied",
+        }
+    ],
+)
+
+for name, metric in result.metrics.items():
+    print(f"{name}: score={metric.score}, passed={metric.passed}")
+```
+
+- **Task completion** checks whether execution evidence establishes `expected_outcome`. Plans, attempts, and claims of success are insufficient.
+- **Tool grounding** checks whether the response's claims match the observed tool results, including failed or unverified executions.
+
+Here, ticket creation failed while the agent claimed success. Both rubrics describe a failure; the returned scores depend on Jev's judgment.
+
+Capture `trace` from actual executions in your integration. The preset covers completion and result reporting; step ordering, efficiency, and recovery quality need separate checks. See the [runnable example](https://github.com/TrustifAI/typed_evals/blob/main/examples/agent_evaluation.py) and the [runtime guide](https://github.com/TrustifAI/typed_evals/blob/main/docs/RUNTIME.md) for enforcing checks at agent and tool boundaries.
 
 ## Evaluate a dataset
 
@@ -191,6 +225,8 @@ print(list_metrics())  # No API credentials needed.
 `PolicyCompliance` and `ToolSafety` require `policy=...` when constructed. See the [metric definitions](https://github.com/TrustifAI/typed_evals/blob/main/docs/EVALUATION.md#built-in-metrics) for required evidence and score meanings.
 
 </details>
+
+<a id="write-a-custom-metric"></a>
 
 <details>
 <summary><strong>Write a custom metric</strong></summary>
