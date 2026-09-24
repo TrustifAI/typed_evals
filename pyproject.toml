@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "typed_evals"
 version = "0.1.0"
-description = "Evaluation for LLM and agents using Jev, with opt-in isotonic calibration."
+description = "Evaluation for LLM and Agents using System One Models, with opt-in isotonic calibration."
 readme = "README.md"
 authors = [
     { name = "Aaryan Verma" }

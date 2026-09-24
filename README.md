@@ -5,14 +5,19 @@ Optionally calibrate individual metrics against human pass/fail labels.
 
 **Made with ❤︎ by [Aaryan Verma](https://github.com/Aaryanverma).**
 
-This is NOT an official [TypeSafe AI]((https://typesafe.ai/)) product.
-
 The project, command-line tool, and Python package are all named `typed_evals`.
 The Python package lives directly in the repository root.
 
 `Requires python >= 3.11`
 
 ## Install
+
+```python
+pip install typed_evals
+export TYPESAFE_API_KEY='your-key'
+```
+
+OR
 
 ```bash
 python -m pip install .

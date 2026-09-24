@@ -1,0 +1,109 @@
+name: Release Python Package
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Release checks
+    uses: ./.github/workflows/test.yml
+
+  build:
+    name: Build package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Validate release version
+        shell: python
+        run: |
+          import os
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+          version = project["version"]
+          ref = os.environ["GITHUB_REF"]
+          if ref.startswith("refs/tags/"):
+              expected = f"refs/tags/v{version}"
+              if ref != expected:
+                  raise SystemExit(f"Release tag {ref!r} must match {expected!r}.")
+              print(f"Validated release {version}.")
+          else:
+              print(f"Validating {version} without publishing: {ref} is not a tag.")
+
+      - name: Install build tools
+        run: python -m pip install --upgrade build twine
+
+      - name: Build wheel and sdist
+        # The default builds the wheel from the sdist, checking it is complete.
+        run: python -m build
+
+      - name: Validate distribution metadata
+        run: python -m twine check --strict dist/*
+
+      - name: Install built wheel
+        run: python -m pip install dist/*.whl
+
+      - name: Smoke test installed wheel
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -I -c "from importlib.metadata import version; from importlib.resources import files; import typed_evals; assert typed_evals.__version__ == version('typed_evals'); assert files('typed_evals').joinpath('py.typed').is_file()"
+          python -I -m typed_evals --help
+          typed_evals --help
+
+      - name: Upload artifact for publishing
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: python-package
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Publish package to PyPI
+    needs: [test, build]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/typed_evals/
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-package
+          path: dist
+
+      - name: Publish to PyPI
+        # Configure Trusted Publishing on PyPI; see docs/PUBLISHING.md.
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          attestations: true
