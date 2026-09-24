@@ -5,15 +5,12 @@ Optionally calibrate individual metrics against human pass/fail labels.
 
 **Made with ❤︎ by [Aaryan Verma](https://github.com/Aaryanverma).**
 
-The project, command-line tool, and Python package are all named `typed_evals`.
-The Python package lives directly in the repository root.
-
 `Requires python >= 3.11`
 
 ## Install
 
 ```python
-pip install typed_evals
+pip install typed-evals
 export TYPESAFE_API_KEY='your-key'
 ```
 
@@ -26,7 +23,7 @@ export TYPESAFE_API_KEY='your-key'
 
 The default judge is `jev-1.13.0`, through the official `typesafe-sdk` 0.7.x.
 For an offline demonstration without credentials, run `python examples/offline_demo.py`
-after installing the fitting dependency with `pip install '.[calibration]'`.
+after installing the fitting dependency with `pip install 'typed-evals[calibration]'`.
 
 ## Evaluate a RAG response
 
@@ -93,7 +90,7 @@ The synchronous API also works in notebooks, but blocks until evaluation finishe
 
 ## Guard a LangChain tool
 
-Install `pip install '.[langchain]'`, then decorate the tool before registering it:
+Install `pip install 'typed-evals[langchain]'`, then decorate the tool before registering it:
 
 ```python
 from langchain.tools import ToolRuntime, tool
@@ -129,9 +126,9 @@ Framework integrations are optional:
 
 | Framework | Install from this repository | Adapter |
 |---|---|---|
-| LangChain | `pip install '.[langchain]'` | `typed_evals.adapters.langchain.guard_tool` |
-| CrewAI | `pip install '.[crewai]'` | `typed_evals.adapters.crewai.guard_tool` |
-| Microsoft Agent Framework | `pip install '.[agent-framework]'` | `typed_evals.adapters.agent_framework.guard_tool` |
+| LangChain | `pip install 'typed-evals[langchain]'` | `typed_evals.adapters.langchain.guard_tool` |
+| CrewAI | `pip install 'typed-evals[crewai]'` | `typed_evals.adapters.crewai.guard_tool` |
+| Microsoft Agent Framework | `pip install 'typed-evals[agent-framework]'` | `typed_evals.adapters.agent_framework.guard_tool` |
 
 The CrewAI decorator creates a native tool ready for `Agent(tools=[...])`.
 The Microsoft adapter wraps a function under `@agent_framework.tool` and reads
