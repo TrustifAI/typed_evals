@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-labelledby="title description">
+  <title id="title">Typed Evals: know what passed, decide what runs</title>
+  <desc id="description">Evidence flows through a metric panel into a typed result with scores, thresholds, and status. Evaluate responses, guard tool calls, and calibrate against human labels.</desc>
+  <rect width="1200" height="320" rx="20" fill="#101b2b"/>
+  <path d="M32 32H1168M32 96H1168M32 160H1168M32 224H1168M32 288H1168M96 16V304M224 16V304M352 16V304M480 16V304M608 16V304M736 16V304M864 16V304M992 16V304M1120 16V304" fill="none" stroke="#1a293c"/>
+  <path d="M604 0V320" stroke="#334155" stroke-opacity="0.45"/>
+  <rect x="48" y="43" width="4" height="17" rx="2" fill="#5eead4"/>
+  <text x="65" y="56" fill="#99f6e4" font-family="Arial, Helvetica, sans-serif" font-size="12" font-weight="700" letter-spacing="2">EVALUATE / GUARD / CALIBRATE</text>
+
+  <text x="48" y="127" fill="#f8fafc" font-family="Arial, Helvetica, sans-serif" font-size="48" font-weight="700">Know what passed.</text>
+  <text x="48" y="187" fill="#5eead4" font-family="Arial, Helvetica, sans-serif" font-size="48" font-weight="700">Decide what runs.</text>
+  <text x="50" y="232" fill="#bdc9d8" font-family="Arial, Helvetica, sans-serif" font-size="17">LLM responses · RAG · agent tools</text>
+  <path d="M50 265H552" stroke="#334155"/>
+  <text x="50" y="287" fill="#94a3b8" font-family="Arial, Helvetica, sans-serif" font-size="12" letter-spacing="0.3">Your evidence. Your rubrics. Your thresholds.</text>
+
+  <rect x="648" y="32" width="504" height="256" rx="14" fill="#172538" stroke="#35475e"/>
+  <circle cx="674" cy="59" r="4" fill="#5eead4"/>
+  <text x="689" y="63" fill="#d5e2ef" font-family="Arial, Helvetica, sans-serif" font-size="11" font-weight="700" letter-spacing="1.6">FROM EVIDENCE TO DECISION</text>
+  <path d="M668 82H1132" stroke="#35475e"/>
+  <path d="M684 112V245" stroke="#436577" stroke-width="2"/>
+
+  <g font-family="Arial, Helvetica, sans-serif">
+    <circle cx="684" cy="112" r="10" fill="#172538" stroke="#78bcee" stroke-width="2"/>
+    <circle cx="684" cy="112" r="3" fill="#78bcee"/>
+    <text x="711" y="117" fill="#f1f5f9" font-size="17" font-weight="700">Evidence</text>
+    <text x="711" y="137" fill="#bdc9d8" font-size="13">Request, response, context, or tool trace</text>
+
+    <circle cx="684" cy="177" r="10" fill="#172538" stroke="#78bcee" stroke-width="2"/>
+    <circle cx="684" cy="177" r="3" fill="#78bcee"/>
+    <text x="711" y="182" fill="#f1f5f9" font-size="17" font-weight="700">Metric panel</text>
+    <text x="711" y="202" fill="#bdc9d8" font-size="13">Built-in checks or your own rubric</text>
+
+    <circle cx="684" cy="242" r="10" fill="#163b39" stroke="#5eead4" stroke-width="2"/>
+    <path d="m679 242 3 3 6-6" fill="none" stroke="#5eead4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="711" y="247" fill="#99f6e4" font-size="17" font-weight="700">Typed result</text>
+    <text x="711" y="267" fill="#bdc9d8" font-size="13">Scores, thresholds, and explicit status</text>
+  </g>
+</svg>

@@ -5,7 +5,7 @@ and generates distribution attestations. It does not use a stored API token.
 
 ## One-time setup
 
-Create a GitHub environment named `pypi` in `TrustifAI/jev-eval`. Restrict its
+Create a GitHub environment named `pypi` in `TrustifAI/typed_evals`. Restrict its
 deployment tags to `v*` and add required reviewers if available for the repository.
 
 On PyPI, configure a GitHub Trusted Publisher for the following values:
@@ -14,7 +14,7 @@ On PyPI, configure a GitHub Trusted Publisher for the following values:
 | --- | --- |
 | PyPI project | `typed_evals` |
 | GitHub owner | `TrustifAI` |
-| Repository | `jev-eval` |
+| Repository | `typed_evals` |
 | Workflow filename | `publish.yml` |
 | Environment | `pypi` |
 

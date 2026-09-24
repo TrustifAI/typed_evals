@@ -1,96 +1,129 @@
-# Typed Evals
+<h1 align="center">Typed Evals</h1>
 
-Evaluate LLM responses, RAG datasets, and recorded agent executions using System One Models like **[Jev](https://typesafe.ai/)** as the judge. Guard tools before they execute.
-Optionally calibrate individual metrics against human pass/fail labels.
+<p align="center">
+  <strong>Evaluate responses. Guard actions.</strong><br>
+  A Python toolkit for evaluating LLMs, RAG, and agents—with optional calibration against human labels.
+</p>
 
-**Made with ❤︎ by [Aaryan Verma](https://github.com/Aaryanverma).**
+<p align="center">
+  <a href="https://pypi.org/project/typed-evals/"><img src="https://img.shields.io/pypi/v/typed-evals?style=flat-square&amp;color=0f766e" alt="PyPI version"></a>
+  <a href="https://pypi.org/project/typed-evals/"><img src="https://img.shields.io/badge/python-3.11%2B-2563eb?style=flat-square" alt="Python 3.11 and later"></a>
+  <a href="https://github.com/TrustifAI/typed_evals/actions/workflows/test.yml"><img src="https://github.com/TrustifAI/typed_evals/actions/workflows/test.yml/badge.svg?branch=main" alt="Tests"></a>
+  <a href="https://github.com/TrustifAI/typed_evals/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-64748b?style=flat-square" alt="MIT license"></a>
+</p>
 
-`Requires python >= 3.11`
+<p align="center">
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#guard-tool-calls">Tool guards</a> ·
+  <a href="#calibration">Calibration</a> ·
+  <a href="#examples-and-guides">Examples &amp; guides</a>
+</p>
 
-## Install
+<p align="center">
+  <img src="https://raw.githubusercontent.com/TrustifAI/typed_evals/main/docs/assets/readme-banner.svg" width="1200" alt="Know what passed. Decide what runs. Typed Evals takes your evidence through a metric panel and returns typed scores, thresholds, and status.">
+</p>
 
-```python
-pip install typed-evals
-export TYPESAFE_API_KEY='your-key'
-```
+Use **[Jev](https://typesafe.ai/)**, a System One model, to judge generated responses and recorded agent executions. Check proposed tool calls before they run. Start with a preset, then bring your own metrics, thresholds, or judge backend as your application grows.
 
-OR
+## Quickstart
+
+Install with **Python 3.11+** and set your [TypeSafe](https://typesafe.ai/) API key:
 
 ```bash
-python -m pip install .
+python -m pip install typed-evals
 export TYPESAFE_API_KEY='your-key'
 ```
 
-The default judge is `jev-1.13.0`, through the official `typesafe-sdk` 0.7.x.
-For an offline demonstration without credentials, run `python examples/offline_demo.py`
-after installing the fitting dependency with `pip install 'typed-evals[calibration]'`.
-
-## Evaluate a RAG response
+Evaluate a response against the evidence used to generate it:
 
 ```python
 from typed_evals import evaluate
 
 result = evaluate(
-    input="What is the refund period?",  # your query
-    response="You can request a refund within 30 days.",  # Response from your LLM
-    contexts=["Refunds are allowed within 30 days of purchase."],  # context used for query
+    input="What is the refund period?",
+    response="You can request a refund within 30 days.",
+    contexts=["Refunds are allowed within 30 days of purchase."],
     preset="rag",
 )
 
-print(result.passed)
+print("All checks passed:", result.passed)
 for name, metric in result.metrics.items():
-    print(name, metric.score, metric.passed)
+    print(f"{name}: score={metric.score}, passed={metric.passed}")
 ```
 
-Supply your evidence and choose a preset. Credentials come from the environment;
-backend configuration and metric objects are optional. Without a preset or custom
-metrics, evaluation checks **answer relevancy only**, even when contexts are supplied.
+That checks **faithfulness**, **answer relevancy**, and **context relevance** in one judge request. The default backend uses `jev-1.13.0` through the official `typesafe-sdk` 0.7.x; live examples make API calls using your account.
 
-| Preset | Checks | Required evidence |
-|---|---|---|
-| `"response"` (default) | Answer relevancy | `input`, `response` |
+**Want to explore without an API key?** Jump to the [offline demo](#try-it-offline).
+
+## What you can build
+
+| Your workflow | What Typed Evals provides |
+| --- | --- |
+| **Evaluate a RAG pipeline** | Check whether answers address the query and stay grounded in the retrieved context. |
+| **Review agent runs** | Judge task completion and claims about tool results against recorded execution evidence. |
+| **Guard tool calls** | Evaluate proposed calls against your policy before executing the underlying function. |
+| **Run dataset checks** | Evaluate JSON, JSONL, or Python samples; export structured reports and use the CLI in CI. |
+| **Define your own rubric** | Compose nine built-in metrics or write custom binary, categorical, and ordered-score checks. |
+| **Calibrate thresholds** | Fit per-metric curves to human pass/fail labels and inspect performance on held-out data. |
+
+### Choose a preset
+
+| Preset | Checks | Evidence to supply |
+| --- | --- | --- |
+| `"response"` · default | Answer relevancy | `input`, `response` |
 | `"rag"` | Faithfulness, answer relevancy, context relevance | `input`, `response`, `contexts` |
 | `"agent"` | Task completion, tool grounding | `input`, `response`, `trace`, `expected_outcome` |
 
-Presets are fixed panels using the metrics' existing defaults (threshold `0.5`
-for these three panels). They never infer or drop checks based on available data.
-Missing evidence and judge errors raise by default. See the
-[metric definitions and score semantics](docs/EVALUATION.md#built-in-metrics)
-when selecting checks and acceptance thresholds for your application.
+Presets use a `0.5` threshold for each metric. **Supplying contexts alone does not enable RAG checks**—choose `preset="rag"` explicitly. Missing evidence and judge errors raise by default. Use custom metrics to choose different checks or thresholds.
 
 ## Evaluate a dataset
 
+Save your samples as `samples.jsonl`, with one JSON object per line:
+
+```json
+{"input":"Refund period?","response":"30 days.","contexts":["Refunds are allowed within 30 days of purchase."]}
+```
+
 ```python
-report = evaluate("examples/assets/rag_samples.jsonl", preset="rag")
+from typed_evals import evaluate
+
+report = evaluate("samples.jsonl", preset="rag")
 print(report.summary)
 report.save("evaluation-report.json")
 ```
 
-`evaluate` also accepts one dictionary, an `EvaluationSample`, or a list/tuple
-of dictionaries and samples. Direct fields or one sample return `SampleResult`;
-a sequence or file always returns `EvaluationReport`, including empty and
-single-row datasets. JSON files contain arrays; JSONL files contain one row per line:
+You can also pass a dictionary, an `EvaluationSample`, or a list/tuple of either. A single sample returns `SampleResult`; a sequence or file returns `EvaluationReport`, even for one row. JSON files contain an array of samples.
 
-```json
-{"input":"Refund period?","response":"30 days.","contexts":["Refunds allowed within 30 days."]}
-```
+Each sample's metrics share a judge request. Batches validate inputs first, run up to **eight concurrent workers** by default, and preserve input order.
 
-All rows are validated before judging starts. Each sample's metrics share one
-request; batches use up to eight concurrent workers by default and preserve input order.
-
-In notebooks or async applications, use `aevaluate` to keep the event loop responsive:
+**In notebooks and async applications**, use `aevaluate` with the same dataset:
 
 ```python
 from typed_evals import aevaluate
 
-report = await aevaluate("examples/assets/rag_samples.jsonl", preset="rag")
+report = await aevaluate("samples.jsonl", preset="rag")
 ```
 
 The synchronous API also works in notebooks, but blocks until evaluation finishes.
 
-## Guard a LangChain tool
+**From the terminal or CI:**
 
-Install `pip install 'typed-evals[langchain]'`, then decorate the tool before registering it:
+```bash
+typed_evals evaluate samples.jsonl \
+  --metrics faithfulness answer_relevancy context_relevance \
+  --output evaluation-report.json \
+  --fail-on-failure
+```
+
+The CLI returns a nonzero exit code for failed or unavailable evaluations when `--fail-on-failure` is set. See the [evaluation guide](https://github.com/TrustifAI/typed_evals/blob/main/docs/EVALUATION.md) for error policies, data formats, and report fields.
+
+## Guard tool calls
+
+Add a policy check to a LangChain tool before registering it:
+
+```bash
+python -m pip install 'typed-evals[langchain]'
+```
 
 ```python
 from langchain.tools import ToolRuntime, tool
@@ -107,65 +140,27 @@ def read_ticket(ticket_id: str, runtime: ToolRuntime) -> str:
     return ticket_store.read_authorized(runtime.context["customer_id"], ticket_id)
 ```
 
-Here `ticket_store` is your application's ticket service. Supply current,
-application-owned authorization evidence in the agent's runtime context.
-The adapter captures the latest human text, tool name, arguments, and call ID.
-It uses `ToolSafety` with threshold `0.9` and raises `GuardrailViolation` on a
-failed or unavailable judgment before the function executes. Native outputs
-are preserved. The tool still enforces deterministic authorization when it runs.
+Here, `ticket_store` is your application's ticket service. Supply the current customer ID and application-owned authorization evidence through the agent's runtime context; the [complete LangChain example](https://github.com/TrustifAI/typed_evals/blob/main/examples/langchain_guarded_tools.py) shows the wiring.
 
-See the complete [LangChain example](examples/langchain_guarded_tools.py), including
-agent construction and handling blocked calls. For plain Python tools, import
-`guard_tool` from `typed_evals` and supply `input` and `contexts` as values or callbacks
-of bound arguments. The [runtime guide](docs/RUNTIME.md) covers both helpers,
-custom metrics, calibrated guards, and additional checkpoints.
+The adapter captures the latest human request, proposed arguments, tool name, and call ID. By default, it checks `ToolSafety` at a `0.9` threshold and raises `GuardrailViolation` on a failed or unavailable judgment **before the function runs**. Successful calls preserve the tool's native return value. Keep deterministic authorization inside the tool, as shown above.
 
-## CrewAI and Microsoft Agent Framework
+### Use your framework
 
-Framework integrations are optional:
+| Integration | Install | Import `guard_tool` from |
+| --- | --- | --- |
+| Plain Python | `pip install typed-evals` | `typed_evals` |
+| LangChain | `pip install 'typed-evals[langchain]'` | `typed_evals.adapters.langchain` |
+| CrewAI | `pip install 'typed-evals[crewai]'` | `typed_evals.adapters.crewai` |
+| Microsoft Agent Framework | `pip install 'typed-evals[agent-framework]'` | `typed_evals.adapters.agent_framework` |
 
-| Framework | Install from this repository | Adapter |
-|---|---|---|
-| LangChain | `pip install 'typed-evals[langchain]'` | `typed_evals.adapters.langchain.guard_tool` |
-| CrewAI | `pip install 'typed-evals[crewai]'` | `typed_evals.adapters.crewai.guard_tool` |
-| Microsoft Agent Framework | `pip install 'typed-evals[agent-framework]'` | `typed_evals.adapters.agent_framework.guard_tool` |
+The plain Python helper takes explicit `input` and `contexts`, as values or callbacks. The CrewAI adapter creates a native tool; the Microsoft adapter wraps a function under `@agent_framework.tool`. See the [adapter guide](https://github.com/TrustifAI/typed_evals/blob/main/docs/ADAPTERS.md) for each framework's registration and evidence requirements, and the [runtime guide](https://github.com/TrustifAI/typed_evals/blob/main/docs/RUNTIME.md) for agent decorators and additional checkpoints.
 
-The CrewAI decorator creates a native tool ready for `Agent(tools=[...])`.
-The Microsoft adapter wraps a function under `@agent_framework.tool` and reads
-explicitly selected evidence from its injected `FunctionInvocationContext`.
-Both use the same runtime guard and default tool-safety threshold of `0.9`.
-See the [adapter guide](docs/ADAPTERS.md) for registration, runtime evidence, and
-framework error-handling details. Try the offline native-tool examples:
+## Make the checks yours
 
-```bash
-python examples/crewai_guarded_tools.py
-python examples/agent_framework_guarded_tools.py
-```
-
-## Available metrics
-
-List all built-in metric names without API credentials:
+Choose **custom metrics instead of a preset** to control the panel and thresholds:
 
 ```python
-from typed_evals import list_metrics
-
-print(list_metrics())
-# ['answer_correctness', 'answer_relevancy', 'context_relevance',
-#  'faithfulness', 'policy_compliance', 'task_completion',
-#  'tool_accuracy', 'tool_grounding', 'tool_safety']
-```
-
-The function returns a new, alphabetically sorted list. It includes
-`PolicyCompliance` and `ToolSafety`, which require `policy=...` when constructed.
-Custom `Metric` instances are not registered in this list. See the
-[metric definitions](docs/EVALUATION.md#built-in-metrics) for constructors and required evidence.
-
-## Customize when needed
-
-Choose custom metrics **instead of** a preset to control the panel and thresholds:
-
-```python
-from typed_evals import Faithfulness, AnswerRelevancy
+from typed_evals import AnswerRelevancy, Faithfulness, evaluate
 
 result = evaluate(
     input="Refund period?",
@@ -175,163 +170,139 @@ result = evaluate(
 )
 ```
 
-Create a custom metric and use it for evaluation:
+For reusable configuration, use `Evaluator(preset="rag")` or `Evaluator(metrics=[...])`.
+
+<details>
+<summary><strong>Explore the nine built-in metrics</strong></summary>
+
+| Focus | Metrics |
+| --- | --- |
+| Responses and retrieval | `answer_correctness`, `answer_relevancy`, `context_relevance`, `faithfulness` |
+| Recorded agent execution | `task_completion`, `tool_grounding` |
+| Proposed tool calls | `tool_accuracy`, `tool_safety` |
+| Content policy | `policy_compliance` |
 
 ```python
-from typed_evals import Faithfulness, AnswerRelevancy, Metric
+from typed_evals import list_metrics
 
-# create a new metric
-WeirdMetric = Metric(
-    name="weirdness",
-    kind="score",  # noul, choice, score (from Jev)
-    instructions="Assess how weird the response is.",
-    criteria=[
-        "The response is completely normal and expected.",
-        "The response is somewhat unusual but still understandable.",
-        "The response is very weird and unexpected.",
-    ],
-    pass_definition="The response is not weird.",
+print(list_metrics())  # No API credentials needed.
+```
+
+`PolicyCompliance` and `ToolSafety` require `policy=...` when constructed. See the [metric definitions](https://github.com/TrustifAI/typed_evals/blob/main/docs/EVALUATION.md#built-in-metrics) for required evidence and score meanings.
+
+</details>
+
+<details>
+<summary><strong>Write a custom metric</strong></summary>
+
+Define an ordered rubric from least to most desirable. Higher scores pass the threshold, so the last level should describe your best outcome:
+
+```python
+from typed_evals import Metric, evaluate
+
+completeness = Metric(
+    name="completeness",
+    kind="score",
+    instructions="How completely does `response` cover the details requested in `input`?",
+    criteria=(
+        "None of the requested details are supplied.",
+        "Some details are supplied, but essential requested details are missing.",
+        "All essential requested details are supplied.",
+    ),
+    pass_definition="All essential requested details are supplied.",
     required_fields=("input", "response"),
     threshold=0.8,
 )
 
-# add it to metrics
 result = evaluate(
-    input="Refund period?",
-    response="30 days.",
-    contexts=["Refunds are allowed within 30 days."],
-    metrics=[
-        Faithfulness(threshold=0.8),
-        AnswerRelevancy(threshold=0.8),
-        WeirdMetric,
-    ],
+    input="What is the refund period, and how do I request one?",
+    response="You have 30 days. Contact support with your order number.",
+    metrics=[completeness],
 )
 ```
 
+An ordered `score` rubric produces a normalized expected level between `0` and `1`; it is not automatically a probability of human acceptance. For binary and categorical rubrics, use `kind="noul"` and `kind="choice"`. The [custom metrics example](https://github.com/TrustifAI/typed_evals/blob/main/examples/custom_metrics.py) shows all three formats.
 
-For reusable configuration, use `Evaluator(preset="rag")` or `Evaluator(metrics=[...])`.
-Existing `EvaluationSample`, `Evaluator`, `EvaluationPipeline`, and runtime APIs
-remain available. Pass `backend=JevBackend(model="...")` to select a different Jev model.
+</details>
 
-## Use another judge backend
+<details>
+<summary><strong>Choose another model or implement a backend</strong></summary>
 
-The Python API supports custom judge backends through the public `Backend` and
-`JudgeSession` protocols. Jev is the only bundled provider today, but a future
-provider can be integrated by implementing an adapter and passing it as `backend=`
-to `evaluate`, `aevaluate`, `Evaluator`, or `EvaluationPipeline`. Runtime guards
-can use the same adapter through their evaluator or `guard_tool(backend=...)`.
+Pass `backend=JevBackend(model="...")` to choose a different Jev model. Jev is the only bundled provider; custom providers implement the public `Backend` and `JudgeSession` protocols and can be passed as `backend=` to evaluation and tool guards.
 
-A backend supplies:
+An adapter supplies a model ID, an async `session()` context manager, and `async judge(state, questions)` returning a `JudgeResponse`. It must translate the TypeSafe SDK's Noul, Choice, and Score formats into provider requests and matching answers. The `typesafe-sdk` dependency remains required; the CLI uses `JevBackend`.
 
-- `model: str`, identifying the configured judge model.
-- `session()`, an async context manager yielding a judge session.
-- `async judge(state, questions)` on that session, returning a `JudgeResponse`
-  with the actual model ID, answers keyed by metric name, and optional usage.
+See the [backend contract](https://github.com/TrustifAI/typed_evals/blob/main/docs/ARCHITECTURE.md#backend-interface) and [synthetic backend example](https://github.com/TrustifAI/typed_evals/blob/main/examples/offline_demo.py).
 
-Once your adapter is implemented, use it directly:
-
-```python
-from typed_evals import evaluate
-from your_app.backends import YourBackend  # Your provider adapter.
-
-result = evaluate(
-    input="What is the refund period?",
-    response="You can request a refund within 30 days.",
-    backend=YourBackend(),
-)
-```
-
-The current question and answer contract uses the TypeSafe SDK's Noul, Choice,
-and Score formats. Your adapter must translate the rubrics into provider requests
-and return answers matching the selected metrics' formats and score semantics;
-the `typesafe-sdk` dependency is still required. The CLI currently uses `JevBackend`.
-See the [backend interface](docs/ARCHITECTURE.md#backend-interface) and the
-[synthetic backend example](examples/offline_demo.py) for an existing implementation.
+</details>
 
 ## Calibration
 
-A raw judge score of `0.8` does not necessarily mean humans would pass 80% of
-similar examples. Calibration uses representative human labels to align each
-metric's scores with observed pass rates, helping you set meaningful thresholds
-for your use case.
+**Make thresholds reflect your own acceptance criteria.** A raw judge score of `0.8` does not necessarily mean humans would pass 80% of similar examples.
 
-Calibration is off by default. Use `EvaluationPipeline` to fit or load per-metric
-curves against representative human labels; see the [calibration guide](docs/CALIBRATION.md).
-`score` is the raw metric score unless calibration is applied. `passed` compares
-the score with the metric threshold; it is `None` for unavailable evaluations.
-Jev judgments can be wrong, and the checks do not establish a single probability
-that an entire answer is true.
+With `typed-evals[calibration]`, use `EvaluationPipeline` to fit per-metric isotonic curves against representative human pass/fail labels. Inspect the held-out diagnostics, save the fitted artifact, and load it for later evaluations. Calibration is opt-in; improvements are measured on held-out data rather than assumed.
 
-## Documentation, notebooks, and examples
+Read the [calibration walkthrough](https://github.com/TrustifAI/typed_evals/blob/main/docs/CALIBRATION.md) for fitting, validation, and saved artifacts. The included labeled datasets are synthetic examples; replace them with human-reviewed labels for your application.
 
-| Folder | Contents |
-|---|---|
-| [`typed_evals/`](typed_evals/) | Main Python package: evaluation, metrics, calibration, runtime guards, adapters, and CLI. |
-| [`docs/`](docs/) | Evaluation, runtime, calibration, and architecture guides. |
-| [`notebooks/`](notebooks/) | Interactive walkthroughs for response, RAG, and agent evaluation. |
-| [`examples/`](examples/) | Python scripts and sample datasets for evaluation and tool guards. |
-| [`tests/`](tests/) | Unit, integration, and optional live API tests. |
+`metric.score` uses the raw score unless calibration is applied. `metric.passed` compares it with the threshold and is `None` for unavailable evaluations. Judge results can be wrong; individual checks do not establish a single probability that an entire answer is true.
 
-Start with the guide for your use case:
+## Try it offline
 
-- [Evaluation guide](docs/EVALUATION.md): metrics, data formats, custom checks, wrappers, CLI.
-- [Runtime guide](docs/RUNTIME.md): tool guards, agent decorators, policy and failure semantics.
-- [Calibration guide](docs/CALIBRATION.md): fitting, held-out validation, saved artifacts.
-- [Adapter guide](docs/ADAPTERS.md): LangChain, CrewAI, and Microsoft Agent Framework tools.
-- [Architecture](docs/ARCHITECTURE.md): implementation boundaries.
-
-The Python package uses lowercase subpackages grouped by responsibility:
-
-```text
-typed_evals/
-├── adapters/       # Framework integrations
-├── backends/       # Judge SDK and backend protocols
-├── calibration/    # Fitting, diagnostics, and saved calibration
-├── data/           # Validated models and dataset loading
-├── evaluation/     # Evaluator, pipeline, and result decorators
-├── metrics/        # Base metric, RAG/agent rubrics, registry, and presets
-└── runtime/        # Guards, agent wrappers, and tool decorators
-```
-
-Public imports such as `from typed_evals import Evaluator, Faithfulness` stay the
-same. For direct module imports, use the paths in the [architecture guide](docs/ARCHITECTURE.md#modules).
-
-For interactive usage, open the [introductory notebook](notebooks/sample_notebook.ipynb)
-or the [advanced notebook](notebooks/advanced_usage.ipynb), which covers custom
-metrics, calibration, and agent integrations. Install this repository into the
-notebook kernel's environment and use the repository root as the working directory
-so the relative dataset paths resolve. The notebooks use `python-dotenv` and make
-live requests with `TYPESAFE_API_KEY`; calibration also needs `.[calibration]`.
-The advanced agent sections additionally use `agent-framework`, `langchain`,
-`langchain-google-genai`, and Gemini credentials.
-
-Examples you can run without API credentials after installing `.[calibration]`:
+Clone the repository to get the example scripts and datasets; they are not bundled in the installed package:
 
 ```bash
+git clone https://github.com/TrustifAI/typed_evals.git
+cd typed_evals
+python -m pip install -e '.[calibration]'
 python examples/offline_demo.py
+```
+
+This demo uses a deterministic synthetic judge: **no API key and no network calls**. It shows how a raw score, a calibrated probability, and a pass/fail decision relate.
+
+From the same checkout, explore runtime enforcement:
+
+```bash
 python examples/runtime_guardrails.py
 python examples/decorated_agent.py
 ```
 
-For live evaluation, see [RAG evaluation](examples/rag_evaluation.py),
-[recorded agent evaluation](examples/agent_evaluation.py), and the
-[calibrated pipeline](examples/calibrated_pipeline.py). The
-[custom metrics](examples/custom_metrics.py) example defines reusable rubrics, and
-the [LangChain tool guard](examples/langchain_guarded_tools.py) example demonstrates
-guarding an agent's tool calls.
+The [CrewAI](https://github.com/TrustifAI/typed_evals/blob/main/examples/crewai_guarded_tools.py) and [Microsoft Agent Framework](https://github.com/TrustifAI/typed_evals/blob/main/examples/agent_framework_guarded_tools.py) demos also use synthetic judges; install the corresponding framework extra first.
 
-## Development
+## Examples and guides
+
+| Start here | What you'll learn |
+| --- | --- |
+| [Evaluation](https://github.com/TrustifAI/typed_evals/blob/main/docs/EVALUATION.md) | Metrics, datasets, reports, custom checks, and CLI usage. |
+| [Runtime guards](https://github.com/TrustifAI/typed_evals/blob/main/docs/RUNTIME.md) | Tool guards, agent decorators, and failure behavior. |
+| [Framework adapters](https://github.com/TrustifAI/typed_evals/blob/main/docs/ADAPTERS.md) | LangChain, CrewAI, and Microsoft Agent Framework integration. |
+| [Calibration](https://github.com/TrustifAI/typed_evals/blob/main/docs/CALIBRATION.md) | Human labels, held-out validation, and reusable artifacts. |
+| [Architecture](https://github.com/TrustifAI/typed_evals/blob/main/docs/ARCHITECTURE.md) | Package structure and the backend extension contract. |
+| [Runnable examples](https://github.com/TrustifAI/typed_evals/tree/main/examples) | RAG evaluation, agent traces, calibration, and guarded tools. |
+| [Introductory notebook](https://github.com/TrustifAI/typed_evals/blob/main/notebooks/sample_notebook.ipynb) | An interactive introduction to evaluation. |
+| [Advanced notebook](https://github.com/TrustifAI/typed_evals/blob/main/notebooks/advanced_usage.ipynb) | Custom metrics, calibration, and agent integrations. |
+
+For notebooks, install the repository into the kernel's environment and run from the repository root. They use `python-dotenv` and make live requests with `TYPESAFE_API_KEY`. Calibration needs the `calibration` extra; the advanced agent sections also need `agent-framework`, `langchain`, `langchain-google-genai`, and Gemini credentials.
+
+## Contribute
+
+Found a confusing result, need an integration, or have a useful evaluation example? [Open an issue](https://github.com/TrustifAI/typed_evals/issues) or send a pull request. Include a minimal reproduction for bugs and tests for behavior changes.
+
+From a repository checkout:
 
 ```bash
 python -m pip install -e '.[calibration,dev,langchain,crewai,agent-framework]'
-pytest --cov=typed_evals --cov-report=term-missing
+pytest -m "not live" --cov=typed_evals --cov-report=term-missing
 ruff check .
 ruff format --check .
 python -m build
 ```
 
-Tests cover SDK serialization, retries, evaluation, calibration, runtime enforcement,
-and native LangChain, CrewAI, and Microsoft Agent Framework tool dispatch with fake judges.
-CI installs all framework extras so integration tests run. Without an extra, that
-framework's integration tests are skipped. The optional live smoke test
-makes a billable API call only with both `TYPED_EVALS_LIVE=1` and `TYPESAFE_API_KEY` set.
+CI runs the framework integrations with fake judges. Tests for optional frameworks are skipped when those extras are absent. The separate live smoke test requires both `TYPED_EVALS_LIVE=1` and `TYPESAFE_API_KEY` and makes a billable request. Maintainers can follow the [publishing guide](https://github.com/TrustifAI/typed_evals/blob/main/docs/PUBLISHING.md) to cut a release.
+
+---
+
+<p align="center">
+  Built by <a href="https://github.com/Aaryanverma">Aaryan Verma</a> ·
+  <a href="https://github.com/TrustifAI/typed_evals/blob/main/LICENSE">MIT licensed</a><br>
+  <strong>Useful for your next evaluation? Star the repo to keep it close.</strong>
+</p>
