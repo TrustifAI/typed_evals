@@ -76,8 +76,3 @@ The ability to rank hallucinated answers above supported ones also showed no imp
 Typed Evals makes the adjustment reusable: learn it from representative human labels, save it, and apply it to future scores from the same judge and check. In this run, that meant better probability estimates without another judge call for each answer.
 
 This supports the value of calibration on TRIVIA+. It does not establish a better hallucination detector or superiority over other judges, and results on other data may differ.
-
----
-
-**Sources & scope**  
-Dataset and cleanup: the pinned [TRIVIA+ release](https://github.com/amazon-science/hallucination-benchmark-trivialplus/tree/b71110b612f7ea7b2e65ff7af45b5338cece2fe5) and dataset audit. Results: the supplied live `RESULTS.md` and validation-selected cutoff table. Implementation: [Typed Evals](https://github.com/TrustifAI/typed_evals). Speed and cost were not measured.
