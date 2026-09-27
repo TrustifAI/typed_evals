@@ -282,6 +282,12 @@ Read the [calibration walkthrough](https://github.com/TrustifAI/typed_evals/blob
 
 `metric.score` uses the raw score unless calibration is applied. `metric.passed` compares it with the threshold and is `None` for unavailable evaluations. Judge results can be wrong; individual checks do not establish a single probability that an entire answer is true.
 
+## Benchmark: TRIVIA+
+
+On **645 TRIVIA+ test answers**, calibration reduced Jev's expected calibration error (ECE) by **68.1%**, from 0.0982 to 0.0313, with no additional judge calls. With cutoffs chosen on validation data, hallucination detection remained similar: F1 moved from 0.5833 to 0.5877, while accuracy stayed around 72%.
+
+The measured gain was in how closely probabilities matched human judgments. Read the [full benchmark](docs/BENCHMARK.md) for the dataset, methodology, results, and limitations.
+
 ## Try it offline
 
 Clone the repository to get the example scripts and datasets; they are not bundled in the installed package:
