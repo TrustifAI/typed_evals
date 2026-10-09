@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from base64 import b64decode, b64encode
+from binascii import Error as Base64Error
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -12,6 +14,78 @@ Probability = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
 
 class Model(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+
+class ImageInput(Model):
+    """Inline image evidence, portable across providers and dataset files.
+
+    File helpers snapshot the bytes when called; evaluation never reads an implicit
+    local path or downloads a remote URL. The declared MIME type is validated, but
+    image decoding and visual-format validation belong to the receiving provider.
+    """
+
+    data_url: StrictStr
+    detail: Literal["auto", "low", "high", "original"] = "auto"
+    label: StrictStr | None = None
+
+    @field_validator("data_url")
+    @classmethod
+    def inline_image(cls, value: str) -> str:
+        header, separator, encoded = value.partition(",")
+        supported = {f"data:image/{kind};base64" for kind in ("png", "jpeg", "webp", "gif")}
+        if not separator or header not in supported:
+            raise ValueError("image must be an inline base64 PNG, JPEG, WebP, or GIF data URL")
+        try:
+            decoded = b64decode(encoded, validate=True)
+        except (Base64Error, ValueError) as exc:
+            raise ValueError("image data URL must contain valid base64") from exc
+        if not decoded:
+            raise ValueError("image data URL must contain nonempty image bytes")
+        # Canonicalize padding bits so equivalent bytes have one evidence identity.
+        return f"{header},{b64encode(decoded).decode('ascii')}"
+
+    @field_validator("label")
+    @classmethod
+    def nonblank_label(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("image label must contain text")
+        return value
+
+    @classmethod
+    def from_bytes(
+        cls,
+        data: bytes,
+        *,
+        mime_type: str,
+        detail: Literal["auto", "low", "high", "original"] = "auto",
+        label: str | None = None,
+    ) -> ImageInput:
+        """Embed bytes with an explicitly declared supported image MIME type."""
+        if not isinstance(data, bytes):
+            raise TypeError("image data must be bytes")
+        encoded = b64encode(data).decode("ascii")
+        return cls(data_url=f"data:{mime_type};base64,{encoded}", detail=detail, label=label)
+
+    @classmethod
+    def from_file(
+        cls,
+        path: str | Path,
+        *,
+        detail: Literal["auto", "low", "high", "original"] = "auto",
+        label: str | None = None,
+    ) -> ImageInput:
+        """Read an image now, inferring its MIME type from a supported file suffix."""
+        path = Path(path)
+        mime_type = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+        }.get(path.suffix.lower())
+        if mime_type is None:
+            raise ValueError("image file must have a .png, .jpg, .jpeg, .webp, or .gif suffix")
+        return cls.from_bytes(path.read_bytes(), mime_type=mime_type, detail=detail, label=label)
 
 
 class ToolCall(Model):
@@ -42,6 +116,7 @@ class EvaluationSample(Model):
     input: Annotated[StrictStr, Field(min_length=1)]
     response: StrictStr
     contexts: tuple[StrictStr, ...] = ()
+    images: tuple[ImageInput, ...] = ()
     reference: StrictStr | None = None
     trace: tuple[ToolCall, ...] = ()
     expected_outcome: StrictStr | None = None
@@ -71,6 +146,9 @@ class EvaluationSample(Model):
     def content_hash(self) -> str:
         # IDs, grouping and metadata are never evidence for a metric.
         excluded = {"id", "group_id", "metadata"}
+        if not self.images:
+            # Keep text-only sample identities compatible with existing calibration data.
+            excluded.add("images")
         if self.proposed_tool_call is None:
             # Preserve identities of existing offline samples and calibration data.
             excluded.add("proposed_tool_call")

@@ -517,7 +517,7 @@ def test_proposals_cannot_masquerade_as_observed_results_and_legacy_hash_is_stab
     with pytest.raises(ValidationError):
         ToolProposal(name="  ")
     old_data = sample.model_dump(
-        mode="json", exclude={"id", "group_id", "metadata", "proposed_tool_call"}
+        mode="json", exclude={"id", "group_id", "metadata", "proposed_tool_call", "images"}
     )
     assert sample.content_hash == digest(old_data)
     proposed = EvaluationSample(

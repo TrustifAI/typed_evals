@@ -8,6 +8,7 @@ from typing import Any
 
 from typed_evals._utils import digest, run_sync
 from typed_evals.backends import Backend
+from typed_evals.backends.provenance import backend_provenance
 from typed_evals.calibration import (
     CalibrationBundle,
     CalibrationConfig,
@@ -135,6 +136,10 @@ class EvaluationPipeline:
             raise CalibrationError(
                 "Install fitting dependencies with pip install 'typed_evals[calibration]'"
             ) from exc
+        provenance = backend_provenance(
+            self.evaluator.backend,
+            {metric.name: metric.question() for metric in self.evaluator.metrics},
+        )
         judge = Evaluator(
             self.evaluator.metrics,
             backend=self.evaluator.backend,
@@ -146,7 +151,7 @@ class EvaluationPipeline:
         raw = await judge.aevaluate([row.sample for row in (*train, *validation)])
         actual_models = {result.model for result in raw.results}
         if len(actual_models) != 1 or None in actual_models:
-            raise CalibrationError("Calibration must use one observed Jev model version")
+            raise CalibrationError("Calibration must use one observed model version")
         curves, reports = {}, {}
         for name in metric_map:
             x_train, y_train = self._xy(name, train, raw.results[: len(train)])
@@ -183,6 +188,7 @@ class EvaluationPipeline:
             split=split, random_state=self.config.random_state, metrics=reports
         )
         bundle = CalibrationBundle(
+            schema_version=2,
             created_at=datetime.now(UTC).isoformat(),
             requested_model=self.evaluator.backend.model,
             observed_model=next(iter(actual_models)),
@@ -197,6 +203,7 @@ class EvaluationPipeline:
             reserved_group_hashes=frozenset(
                 row.sample.group_hash for row in all_rows if row.sample.group_hash is not None
             ),
+            backend_provenance=provenance,
         )
         # Publish only after all fits succeed. A failed refit cannot replace a working bundle.
         self._bundle = bundle
@@ -322,6 +329,13 @@ class EvaluationPipeline:
         if self._fitting:
             raise CalibrationError("Cannot load calibration while a fit is running")
         bundle = CalibrationBundle.load(path)
-        bundle.validate_for(self.evaluator.metrics, self.evaluator.backend.model)
+        bundle.validate_for(
+            self.evaluator.metrics,
+            self.evaluator.backend.model,
+            backend_provenance=backend_provenance(
+                self.evaluator.backend,
+                {metric.name: metric.question() for metric in self.evaluator.metrics},
+            ),
+        )
         self._bundle = bundle
         return self

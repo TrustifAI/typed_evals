@@ -7,11 +7,12 @@ import math
 from collections.abc import Sequence
 from numbers import Integral, Real
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, ValidationError, model_validator
 
 from typed_evals._utils import digest, write_json
+from typed_evals.backends.provenance import validate_provenance
 from typed_evals.data.models import EvaluationSample, Model, Probability
 from typed_evals.errors import CalibrationError, CalibrationMismatchError, DataLeakageError
 from typed_evals.metrics import EVIDENCE_FIELDS, Metric
@@ -177,7 +178,8 @@ class CalibrationReport(Model):
 
 
 class CalibrationBundle(Model):
-    schema_version: Literal[1] = 1
+    # Keep the default for manually constructed legacy bundles; new fits set v2 explicitly.
+    schema_version: Literal[1, 2] = 1
     target: Literal["metric_pass"] = "metric_pass"
     created_at: str
     requested_model: str
@@ -189,9 +191,17 @@ class CalibrationBundle(Model):
     report: CalibrationReport
     reserved_sample_hashes: frozenset[str]
     reserved_group_hashes: frozenset[str] = frozenset()
+    backend_provenance: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def complete_bundle(self) -> CalibrationBundle:
+        if self.schema_version == 1:
+            if self.backend_provenance is not None:
+                raise ValueError("Legacy v1 artifacts cannot claim backend provenance")
+        else:
+            if self.backend_provenance is None:
+                raise ValueError("Version 2 artifacts require explicit backend provenance")
+            validate_provenance(self.backend_provenance)
         names = set(self.metric_fingerprints)
         if not names or names != set(self.curves) or names != set(self.report.metrics):
             raise ValueError("artifact metrics, curves, fingerprints, and report must agree")
@@ -203,7 +213,21 @@ class CalibrationBundle(Model):
             raise ValueError("artifact is missing its model identity or dataset hashes")
         return self
 
-    def validate_for(self, metrics: Sequence[Metric], requested_model: str) -> None:
+    def validate_for(
+        self,
+        metrics: Sequence[Metric],
+        requested_model: str,
+        *,
+        backend_provenance: dict[str, Any] | None = None,
+    ) -> None:
+        # Retain the two-argument legacy/custom check. A verified v2 artifact needs a
+        # current backend identity; evaluation and loading always provide one.
+        if backend_provenance is not None:
+            self._validate_backend(backend_provenance)
+        elif self.schema_version == 2 and self.backend_provenance["status"] == "verified":
+            raise CalibrationMismatchError(
+                "Verified calibration requires current backend provenance; use an evaluator"
+            )
         if requested_model != self.requested_model:
             raise CalibrationMismatchError(
                 "Requested model differs from the calibration model; refit"
@@ -218,6 +242,26 @@ class CalibrationBundle(Model):
         if fields != self.evidence_fields:
             raise CalibrationMismatchError(
                 "Calibration evidence fields do not match the metric panel"
+            )
+
+    def _validate_backend(self, provenance: dict[str, Any]) -> None:
+        validate_provenance(provenance)
+        if self.schema_version == 1:
+            configuration = provenance.get("configuration", {})
+            if provenance["status"] == "unknown" or (
+                configuration.get("provider") == "typesafe"
+                and configuration.get("backend") == "jev"
+                and configuration.get("compiler_version") == "1"
+            ):
+                # Established v1 Jev and model/session-only custom workflows remain usable.
+                # This compatibility rule asserts no historical provider/compiler identity.
+                return
+            raise CalibrationMismatchError(
+                "Legacy calibration has no backend/compiler provenance; refit with this backend"
+            )
+        if provenance != self.backend_provenance:
+            raise CalibrationMismatchError(
+                "Calibration backend, compiler, or score-producing configuration changed; refit"
             )
 
     def check_model(self, model: str) -> None:

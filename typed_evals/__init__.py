@@ -1,12 +1,19 @@
-"""Jev-powered evaluation, with optional per-metric isotonic calibration."""
+"""Typed judge evaluation, with optional per-metric isotonic calibration."""
 
-from typed_evals.backends import Backend, JevBackend, JudgeResponse, JudgeSession
+from typed_evals.backends import (
+    Backend,
+    JevBackend,
+    JudgeResponse,
+    JudgeSession,
+    OpenAIDecisionsBackend,
+)
 from typed_evals.calibration import CalibrationBundle, CalibrationConfig, IsotonicCalibrator
 from typed_evals.data.datasets import load_calibration_dataset, load_dataset
 from typed_evals.data.models import (
     CalibrationExample,
     EvaluationReport,
     EvaluationSample,
+    ImageInput,
     MetricResult,
     SampleResult,
     ToolCall,
@@ -59,12 +66,14 @@ __all__ = [
     "GuardedResponse",
     "GuardPolicy",
     "GuardrailViolation",
+    "ImageInput",
     "IsotonicCalibrator",
     "JevBackend",
     "JudgeResponse",
     "JudgeSession",
     "Metric",
     "MetricResult",
+    "OpenAIDecisionsBackend",
     "PolicyCompliance",
     "RuntimeGuard",
     "SampleResult",

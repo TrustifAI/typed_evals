@@ -18,6 +18,7 @@ EVIDENCE_FIELDS = {
     "input",
     "response",
     "contexts",
+    "images",
     "reference",
     "trace",
     "expected_outcome",
@@ -75,11 +76,16 @@ class Metric(Model):
     @property
     def fingerprint(self) -> str:
         # Decision threshold is policy; changing it does not change the target event.
+        state_schema = 1
+        if "images" in self.required_fields:
+            state_schema = 3
+        elif "proposed_tool_call" in self.required_fields:
+            state_schema = 2
         return digest(
             {
                 "metric": self.model_dump(mode="json", exclude={"threshold"}),
                 "evaluation_policy": EVALUATION_POLICY,
-                "state_schema": 2 if "proposed_tool_call" in self.required_fields else 1,
+                "state_schema": state_schema,
             }
         )
 
@@ -97,7 +103,12 @@ class Metric(Model):
         ]
 
     def question(self) -> Noul | Choice | Score:
-        instructions = {"question": self.instructions, "evaluation_policy": EVALUATION_POLICY}
+        instructions: dict[str, Any] = {
+            "question": self.instructions,
+            "evaluation_policy": EVALUATION_POLICY,
+        }
+        if "images" in self.required_fields:
+            instructions["required_modalities"] = ["text", "image"]
         if self.kind == "noul":
             return Noul(instructions=instructions, criteria=self.criteria)
         if self.kind == "choice":
