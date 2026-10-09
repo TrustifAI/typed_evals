@@ -46,7 +46,7 @@ from typed_evals.runtime.guards import (
 )
 from typed_evals.runtime.tools import guard_tool
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = [
     "AnswerCorrectness",
     "AnswerRelevancy",
