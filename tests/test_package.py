@@ -75,3 +75,66 @@ else:
         [sys.executable, "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_core_exports_and_jev_work_without_openai(tmp_path):
+    script = """
+import asyncio
+import importlib.abc
+import sys
+from contextlib import asynccontextmanager
+
+class NoOpenAI(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] == 'openai':
+            raise ImportError('OpenAI deliberately unavailable')
+
+sys.meta_path.insert(0, NoOpenAI())
+from typed_evals import (
+    EvaluationSample, Evaluator, JevBackend, JudgeResponse, OpenAIDecisionsBackend,
+)
+from typed_evals.backends import OpenAIDecisionsBackend as BackendExport
+import httpx2
+from typesafe_sdk import AsyncTypeSafeClient, RetryPolicy
+
+assert BackendExport is OpenAIDecisionsBackend
+assert 'openai' not in sys.modules
+
+class CustomBackend:
+    model = 'custom'
+    @asynccontextmanager
+    async def session(self):
+        yield self
+    async def judge(self, state, questions):
+        return JudgeResponse(model=self.model, answers={
+            name: {'type': 'noul', 'noul': 0.9} for name in questions
+        })
+
+async def run():
+    sample = EvaluationSample(input='Question', response='Answer')
+    assert (await Evaluator(backend=CustomBackend()).aevaluate_one(sample)).passed
+    def handler(request):
+        return httpx2.Response(200, json={
+            'model': 'jev-1.13.0', 'usage': {'input_tokens': 2, 'output_tokens': 0},
+            'answers': {'answer_relevancy': {'type': 'noul', 'noul': 0.9}},
+        })
+    async with AsyncTypeSafeClient(
+        api_key='offline-test', transport=httpx2.MockTransport(handler),
+        retry=RetryPolicy(max_retries=0),
+    ) as client:
+        assert (await Evaluator(backend=JevBackend(client=client)).aevaluate_one(sample)).passed
+    try:
+        async with OpenAIDecisionsBackend().session():
+            pass
+    except ImportError as exc:
+        assert 'openai' in str(exc).lower()
+        assert 'install' in str(exc).lower()
+    else:
+        raise AssertionError('Missing OpenAI installation was not reported')
+
+asyncio.run(run())
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr

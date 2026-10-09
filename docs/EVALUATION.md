@@ -28,7 +28,8 @@ until it finishes. To keep the calling event loop responsive, use the async API:
 result = await evaluator.aevaluate_one(sample)
 ```
 
-For a supplied async client (`JevBackend(client=...)`) or a custom backend with
+For a supplied async client (`JevBackend(client=...)` or
+`OpenAIDecisionsBackend(client=...)`) or a custom backend with
 resources tied to an event loop, use the async API in that same loop.
 
 All metrics for a sample share one request. A batch uses a shared connection pool
@@ -36,6 +37,32 @@ and at most `max_concurrency` workers; there is no task per dataset row. Input
 order is preserved. The SDK handles retries and timeouts, without a second retry
 layer. Each sample is one independent judgment request, not a shared multi-sample
 prompt.
+
+## Choose a backend
+
+Jev (`jev-1.13.0`) is the default. To use native OpenAI Decisions, install
+`python -m pip install 'typed-evals[openai]'`, set `OPENAI_API_KEY`, and pass a
+backend to any evaluation entry point:
+
+```python
+from typed_evals import OpenAIDecisionsBackend, evaluate
+
+result = evaluate(
+    input="What is the refund period?",
+    response="You can request a refund within 30 days.",
+    contexts=["Refunds are allowed within 30 days of purchase."],
+    preset="rag",
+    backend=OpenAIDecisionsBackend(timeout=30.0, max_retries=2),
+)
+```
+
+The default Decisions model is `gpt-6-luna`. An explicit `api_key=` is optional;
+the official SDK otherwise uses `OPENAI_API_KEY`. One owned async client is
+shared by workers for a batch and closed after success, errors, or cancellation.
+Injected `AsyncOpenAI` clients remain open with their own timeout/retry settings.
+OpenAI is imported lazily, so Jev and custom providers need no OpenAI installation.
+See the [runnable text example](../examples/openai_decisions.py) and
+[image example](../examples/openai_decisions_images.py).
 
 ```python
 from typed_evals import load_dataset
@@ -48,20 +75,106 @@ report.save("evaluation-report.json")
 # report = await evaluator.aevaluate(samples)
 ```
 
+## Image evidence
+
+`EvaluationSample.images` is a tuple of provider-independent `ImageInput` objects;
+it defaults to empty. Direct `evaluate(images=[...], ...)`, dictionaries, and
+JSON/JSONL datasets accept the same image evidence. Select `"images"` in a custom
+metric's `required_fields` to include them in the judge request:
+
+```python
+from typed_evals import ImageInput, Metric, OpenAIDecisionsBackend, evaluate
+
+visual_grounding = Metric(
+    name="visual_grounding",
+    kind="noul",
+    instructions=(
+        "Does response answer input with visual claims supported by the supplied images?"
+    ),
+    pass_definition="Every material visual claim is supported by the supplied images.",
+    required_fields=("input", "response", "images"),
+    threshold=0.8,
+)
+result = evaluate(
+    input="What total is shown on the receipt?",
+    response="The total is $42.00.",
+    images=[ImageInput.from_file("receipt.png", detail="high", label="receipt")],
+    metrics=[visual_grounding],
+    backend=OpenAIDecisionsBackend(),
+)
+```
+
+Each image has a validated base64 `data_url`, a `detail` value of `"auto"`
+(default), `"low"`, `"high"`, or `"original"`, and an optional `label`. Supported
+MIME types are `image/png`, `image/jpeg`, `image/webp`, and `image/gif`. Use
+`ImageInput.from_file(path, detail="auto", label=None)` for local files or
+`ImageInput.from_bytes(data, mime_type="image/png", detail="auto", label=None)`
+for PNG bytes. `mime_type` is required and must match the supplied bytes. HTTP
+image URLs and provider file IDs are not accepted; inline
+bytes make sample evidence portable and stable for calibration hashing. The helper
+reads a local file when creating the object, so later changes to that file do not
+change the sample's image.
+
+In JSON/JSONL, each image is an object with `data_url`, `detail`, and `label`:
+
+```json
+{"input":"Describe the receipt.","response":"The total is $42.00.","images":[{"data_url":"data:image/png;base64,<base64-image-bytes>","detail":"high","label":"receipt"}]}
+```
+
+Replace the placeholder with actual base64 image bytes. The CLI's built-in metric
+panels select text evidence; define image-selecting metrics in Python.
+
+Only the union of fields required by active metrics is sent. Adding an image to a
+sample does not change built-in presets or text-only requests. When any active
+metric selects images, all active questions share those images in the same request.
+An empty image tuple is missing evidence for an image-selecting metric and follows
+the existing `missing="raise"` or `missing="skip"` policy.
+
+`OpenAIDecisionsBackend` advertises text and image support. It sends a user message
+with JSON text evidence and native `input_image` parts, preserving image order,
+detail, and label mapping. Decisions allows at most 128 selected images per sample;
+that limit belongs to the adapter, not the shared sample schema. Jev currently
+advertises text only. Selected images with an unsupported backend fail before its
+session opens; unselected images remain usable in a text evaluation. Custom
+backends can advertise `supported_modalities={"text", "image"}` and translate the
+same evidence state. A future Jev image adapter can do this without changing the
+sample, metric, or evaluator APIs. Unsupported modalities and provider input-limit
+failures are preflight errors, including with `errors="record"`.
+
+Reports and calibration artifacts do not store raw image data. Image evidence,
+order, detail, and labels enter overlap hashing when selected; use the same visual
+rubric and backend configuration for fitting and inference. See
+[image calibration compatibility](CALIBRATION.md#image-evidence-and-calibration).
+
 ## What the numbers mean
 
 | Field | Meaning |
 |---|---|
 | `raw_score` | Noul probability of true; Choice probability mass of `pass_options`; or normalized expected Score level |
-| `confidence` | Jev's distribution-concentration statistic for Choice/Score; absent for Noul |
+| `confidence` | Provider-supplied Choice/Score confidence; absent for Noul/predicate. Jev uses a distribution-concentration statistic; Decisions preserves its supplied confidence |
 | `calibrated_probability` | Learned estimate of the probability that a human labels this **specific metric** as passing |
 | `score` | Calibrated probability when available, otherwise raw score |
 | `passed` | Whether `score >= metric.threshold`; `None` for skipped/error results |
 
 Calibration learns `raw_score → P(human metric label = 1)`. It does not train on
-Jev's `confidence`, produce the generating LLM's confidence, or estimate whether
+the provider's `confidence`, produce the generating LLM's confidence, or estimate whether
 every decision made by the judge is correct. A normalized ordinal Score is not a
 probability until fitted against a binary pass criterion.
+
+With Decisions, predicate `0.90` produces raw score `0.90`. For Choice, passing
+option probabilities `0.35 + 0.25` produce `0.60` even if another individual option
+wins. Expected Score `1.5` over levels `0, 1, 2` produces raw score `0.75`; the
+metric parser normalizes it exactly once. Confidence never multiplies these scores
+and is not substituted for calibration input. Do not assume confidence has the
+same semantics across providers.
+
+Decisions compiles Noul into predicate instructions containing the evaluation
+policy and both true/false criterion descriptions. Choice retains original string
+keys and descriptions with 2–255 choices, including literal `"true"` and `"false"`
+strings. Score retains declared level order and uses distinct stringified ordinal
+labels even when descriptions repeat. The adapter preserves complete rubrics,
+Unicode, and structured evidence. Invalid associations or distributions are
+rejected before they can look valid through dictionary conversion.
 
 For example, if examples with raw faithfulness around 0.9 have only 70% human
 passes, a representative fitted curve may map that region toward 0.7. That number
@@ -114,7 +227,7 @@ The function is also available from `typed_evals.metrics`.
 `pass_options=("true",)`. Its raw score is the probability assigned to `"true"`;
 the default passing threshold is `0.8`.
 
-These are explicitly defined Jev judgments, **not reproductions of Ragas or
+These are explicitly defined judge rubrics, **not reproductions of Ragas or
 DeepEval metric formulas**. Faithfulness is a whole-response binary judgment,
 not an extracted-claim support fraction. A fact-free response may pass grounding
 while failing usefulness; evaluate both dimensions. Context relevance is not
@@ -138,7 +251,7 @@ Calibration JSONL wraps the sample with **human labels keyed by metric name**:
 
 Use integer `0`/`1` or booleans. Soft labels and model-generated pseudo-labels are
 not the intended calibration target. Labels, metadata, IDs, and group IDs never
-enter the Jev request. Each label requires the corresponding metric's evidence.
+enter the judge request. Each label requires the corresponding metric's evidence.
 Sparse labels are allowed, provided each configured metric meets the split minima.
 
 Use `group_id` to keep the same conversation, source document, customer case, or
@@ -172,7 +285,7 @@ Describe Score levels from low to high. For Choice, use a mapping of description
 and explicitly set `pass_options`. For Noul, ask one crisp positive criterion and
 optionally supply `criteria={"true": "...", "false": "..."}`. See
 [custom_metrics.py](../examples/custom_metrics.py). `pass_definition` documents the
-binary target for annotators; the question and criteria are what Jev judges.
+binary target for annotators; the question and criteria are what the backend judges.
 Arithmetic, counts, and exact tool status checks should remain deterministic code.
 
 ## Use with any RAG or agent framework
@@ -267,6 +380,13 @@ typed_evals calibrate examples/assets/labeled.jsonl \
 
 typed_evals evaluate examples/assets/test.jsonl --metrics faithfulness answer_relevancy \
   --calibration calibration.json --threshold 0.8 --output report.json --fail-on-failure
+
+# Uses gpt-6-luna when --model is omitted:
+typed_evals evaluate examples/assets/rag_samples.jsonl --backend openai-decisions \
+  --metrics faithfulness answer_relevancy --errors record --output openai-report.json
+
+typed_evals calibrate examples/assets/labeled.jsonl --backend openai-decisions \
+  --metrics faithfulness answer_relevancy --output openai-calibration.json
 ```
 
 Exit codes: `0` completed; `1` CI gate failed (including skipped/error/empty
@@ -276,16 +396,42 @@ Use `missing="skip"` / `--missing skip` or `errors="record"` / `--errors record`
 explicitly when partial reports are appropriate. Errors and skips are excluded
 from means, with separate counts.
 
+Both commands support `--backend jev` (default) and `--backend openai-decisions`.
+Omitting `--model` selects that backend's default; supplying it overrides the
+requested identifier. Fit and load Decisions calibration with the same backend.
+
+A Decisions refusal raises by default. With `errors="record"` / `--errors record`,
+the refused metric has status `"error"`, no score, and no pass decision, while
+successful sibling metrics remain available. Any unavailable metric leaves
+`SampleResult.passed` as `None`. Independently attributable malformed answers use
+the same per-metric policy; ambiguous response structure fails the whole request.
+
+Exceptions are available from `typed_evals.errors`. `DecisionRefusalError`
+subclasses `InvalidAnswerError` and identifies an unavailable per-question refusal;
+provider refusal text is withheld. SDK transport failures become
+`OpenAIDecisionsError` after the SDK's configured retries. Its message includes
+only the SDK exception type, with provider response bodies, credentials, and
+exception chaining suppressed. Recorded reports export safe exception types.
+Invalid response structures raise `InvalidAnswerError`; cancellation propagates
+as cancellation. This distinction keeps transport failure separate from a refused
+or malformed judgment without exposing echoed input or secrets.
+
 ## Sources checked
 
 - [Official TypeSafe Python SDK](https://github.com/typesafe-ai/typesafe-sdk-python)
+- [OpenAI Decisions guide](https://developers.openai.com/api/docs/guides/decisions)
+- [OpenAI Python Decisions create reference](https://developers.openai.com/api/reference/python/resources/decisions/methods/create)
+- [OpenAI Decisions create reference](https://developers.openai.com/api/reference/resources/decisions/methods/create)
 - [TypeSafe confidence semantics](https://docs.typesafe.ai/confidence)
 - [TypeSafe Score primitive](https://docs.typesafe.ai/primitives/score)
 - [Anthus Jev calibration experiment](https://anth.us/blog/can-you-trust-jev-confidence/)
 - [scikit-learn probability calibration](https://scikit-learn.org/stable/modules/calibration.html)
 
-The API contract is verified against `typesafe-sdk==0.7.0`. Tests establish code
+The native Decisions contract was checked on **10 October 2026** against the
+three official OpenAI references above and installed SDK `openai==3.27.0`;
+the supported minimum is `3.26.0`. The Jev contract is checked against
+`typesafe-sdk==0.7.0`. Tests establish code
 behavior; real-world metric accuracy and calibration quality require your own
-labeled data. Jev can misjudge long, ambiguous, or adversarial inputs. The supplied
+labeled data. Judges can misjudge long, ambiguous, or adversarial inputs. The supplied
 evaluator instructions are not a proven prompt-injection defense. Model/context
 token limits still apply; the framework does not silently truncate evidence.

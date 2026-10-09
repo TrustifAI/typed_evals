@@ -2,7 +2,7 @@
 
 <p align="center">
   <strong>Evaluate responses. Guard actions.</strong><br>
-  A Python toolkit for evaluating LLMs, RAG, and agents—with optional calibration against human labels.
+  A Python toolkit for evaluating LLMs, RAG, and Agents using Decision Models with optional calibration against human labels
 </p>
 
 <p align="center">
@@ -24,15 +24,15 @@
   <img src="https://raw.githubusercontent.com/TrustifAI/typed_evals/main/docs/assets/readme-banner.svg" width="1200" alt="Know what passed. Decide what runs. Typed Evals takes your evidence through a metric panel and returns typed scores, thresholds, and status.">
 </p>
 
-Use **[Jev](https://typesafe.ai/)**, a System One model, to judge generated responses and recorded agent executions. Check proposed tool calls before they run. Start with a preset, then bring your own metrics, thresholds, or judge backend as your application grows.
+Use **[Jev](https://typesafe.ai/)** by default, or native **[OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions)**, to judge generated responses and recorded agent executions. Check proposed tool calls before they run. Start with a preset, then bring your own metrics, thresholds, or judge backend as your application grows.
 
 ## Quickstart
 
-Install with **Python 3.11+** and set your [TypeSafe](https://typesafe.ai/) API key:
+Install with **Python 3.11+**. This quickstart uses the default Jev backend, which requires a [TypeSafe](https://typesafe.ai/) API key. To use OpenAI Decisions instead, set `OPENAI_API_KEY` and follow [Use OpenAI Decisions](#use-openai-decisions).
 
 ```bash
 python -m pip install typed-evals
-export TYPESAFE_API_KEY='your-key'
+export TYPESAFE_API_KEY='your-key' # or export OPENAI_API_KEY='your_key'
 ```
 
 Evaluate a response against the evidence used to generate it:
@@ -55,6 +55,63 @@ for name, metric in result.metrics.items():
 That checks **faithfulness**, **answer relevancy**, and **context relevance** in one judge request. The default backend uses `jev-1.13.0` through the official `typesafe-sdk` 0.7.x; live examples make API calls using your account.
 
 **Want to explore without an API key?** Jump to the [offline demo](#try-it-offline).
+
+### Use OpenAI Decisions
+
+Install the optional official SDK and set its normal environment variable:
+
+```bash
+python -m pip install 'typed-evals[openai]'
+export OPENAI_API_KEY='your-key'
+```
+
+```python
+from typed_evals import OpenAIDecisionsBackend, evaluate
+
+backend = OpenAIDecisionsBackend(model="gpt-6-luna", timeout=30.0, max_retries=2)
+result = evaluate(
+    input="What is the refund period?",
+    response="You can request a refund within 30 days.",
+    contexts=["Refunds are allowed within 30 days of purchase."],
+    preset="rag",
+    backend=backend,
+)
+print(result.passed)
+```
+
+This uses `POST /v1/decisions` through `AsyncOpenAI.decisions.create` with OpenAI SDK. All active metrics share one request. Samples support text, structured tool evidence, and images. Run [examples/openai_decisions.py](examples/openai_decisions.py) from a checkout for a complete text example.
+
+Each batch owns and closes one async client, shared by its workers. With `OpenAIDecisionsBackend(client=your_async_client)`, you own the client lifecycle and its timeout/retry settings; evaluate asynchronously in the client's event loop. The SDK handles transport retries.
+
+Decisions maps Noul to predicate, Choice to string-valued choices, and Score to ordered levels. Raw scores keep their existing meaning: positive-condition probability, summed probability of passing options, or normalized expected ordinal level. Choice/Score provider confidence is separate; predicates have no confidence field. Refusals are unavailable judgments: they raise by default, or become individual error results under `errors="record"`, preserving successful sibling metrics and leaving the sample's pass status unavailable. Runtime guards apply their configured error policy.
+
+### Evaluate image evidence
+
+Add images to a sample and select them in a custom metric's `required_fields`:
+
+```python
+from typed_evals import ImageInput, Metric, OpenAIDecisionsBackend, evaluate
+
+visual_grounding = Metric(
+    name="visual_grounding",
+    kind="noul",
+    instructions="Does the response accurately describe the supplied image?",
+    pass_definition="Every material visual claim is supported by the image.",
+    required_fields=("input", "response", "images"),
+)
+result = evaluate(
+    input="Describe this receipt.",
+    response="The receipt shows a total of $42.00.",
+    images=[ImageInput.from_file("receipt.png", label="receipt")],
+    metrics=[visual_grounding],
+    backend=OpenAIDecisionsBackend(),
+)
+print(result.passed)
+```
+
+`ImageInput` accepts inline PNG, JPEG, WebP, and GIF data URLs, with `from_file` and `from_bytes` helpers. Images use native Decisions image parts alongside text; image order and optional labels identify the evidence. Built-in presets select text evidence, so attaching images alone does not include them in the judge request. Jev currently supports text; image-selecting metrics require a backend advertising image support. The sample and metric APIs are shared across providers, so future Jev image support can use the same code with `backend=JevBackend()`.
+
+See the [image guide](docs/EVALUATION.md#image-evidence) and [runnable image example](examples/openai_decisions_images.py).
 
 ## What you can build
 
@@ -106,7 +163,7 @@ for name, metric in result.metrics.items():
 - **Task completion** checks whether execution evidence establishes `expected_outcome`. Plans, attempts, and claims of success are insufficient.
 - **Tool grounding** checks whether the response's claims match the observed tool results, including failed or unverified executions.
 
-Here, ticket creation failed while the agent claimed success. Both rubrics describe a failure; the returned scores depend on Jev's judgment.
+Here, ticket creation failed while the agent claimed success. Both rubrics describe a failure; the returned scores depend on the selected judge's judgment.
 
 Capture `trace` from actual executions in your integration. The preset covers completion and result reporting; step ordering, efficiency, and recovery quality need separate checks. See the [runnable example](https://github.com/TrustifAI/typed_evals/blob/main/examples/agent_evaluation.py) and the [runtime guide](https://github.com/TrustifAI/typed_evals/blob/main/docs/RUNTIME.md) for enforcing checks at agent and tool boundaries.
 
@@ -147,6 +204,11 @@ typed_evals evaluate samples.jsonl \
   --metrics faithfulness answer_relevancy context_relevance \
   --output evaluation-report.json \
   --fail-on-failure
+
+# Native OpenAI Decisions; the default model is gpt-6-luna:
+typed_evals evaluate samples.jsonl --backend openai-decisions \
+  --metrics faithfulness answer_relevancy context_relevance \
+  --output openai-report.json --fail-on-failure
 ```
 
 The CLI returns a nonzero exit code for failed or unavailable evaluations when `--fail-on-failure` is set. See the [evaluation guide](https://github.com/TrustifAI/typed_evals/blob/main/docs/EVALUATION.md) for error policies, data formats, and report fields.
@@ -188,6 +250,8 @@ The adapter captures the latest human request, proposed arguments, tool name, an
 | Microsoft Agent Framework | `pip install 'typed-evals[agent-framework]'` | `typed_evals.adapters.agent_framework` |
 
 The plain Python helper takes explicit `input` and `contexts`, as values or callbacks. The CrewAI adapter creates a native tool; the Microsoft adapter wraps a function under `@agent_framework.tool`. See the [adapter guide](https://github.com/TrustifAI/typed_evals/blob/main/docs/ADAPTERS.md) for each framework's registration and evidence requirements, and the [runtime guide](https://github.com/TrustifAI/typed_evals/blob/main/docs/RUNTIME.md) for agent decorators and additional checkpoints.
+
+The currently supported CrewAI release requires OpenAI SDK `<3`, while Decisions requires `>=3.26.0`. Use separate environments for the CrewAI extra and native Decisions until those dependency bounds are compatible. The plain Python, LangChain, and Microsoft guard integrations accept a Decisions backend.
 
 ## Make the checks yours
 
@@ -264,9 +328,9 @@ An ordered `score` rubric produces a normalized expected level between `0` and `
 <details>
 <summary><strong>Choose another model or implement a backend</strong></summary>
 
-Pass `backend=JevBackend(model="...")` to choose a different Jev model. Jev is the only bundled provider; custom providers implement the public `Backend` and `JudgeSession` protocols and can be passed as `backend=` to evaluation and tool guards.
+Pass `backend=JevBackend(model="...")` to choose a different Jev model, or `backend=OpenAIDecisionsBackend()` for native Decisions. Custom providers implement the public `Backend` and `JudgeSession` protocols and can be passed as `backend=` to evaluation and tool guards.
 
-An adapter supplies a model ID, an async `session()` context manager, and `async judge(state, questions)` returning a `JudgeResponse`. It must translate the TypeSafe SDK's Noul, Choice, and Score formats into provider requests and matching answers. The `typesafe-sdk` dependency remains required; the CLI uses `JevBackend`.
+An adapter supplies a model ID, an async `session()` context manager, and `async judge(state, questions)` returning a `JudgeResponse`. It translates the TypeSafe SDK's Noul, Choice, and Score formats into provider requests and matching answers. Image-capable adapters also expose `supported_modalities={"text", "image"}` and translate selected `ImageInput` evidence into their provider's format; existing backends without that attribute remain text-capable. The `typesafe-sdk` dependency remains required for metric construction. OpenAI loads only when used; Jev and custom backends work without the `openai` extra. Both CLI commands accept `--backend jev` (default) or `--backend openai-decisions`; omitted `--model` uses that backend's default.
 
 See the [backend contract](https://github.com/TrustifAI/typed_evals/blob/main/docs/ARCHITECTURE.md#backend-interface) and [synthetic backend example](https://github.com/TrustifAI/typed_evals/blob/main/examples/offline_demo.py).
 
@@ -279,6 +343,8 @@ See the [backend contract](https://github.com/TrustifAI/typed_evals/blob/main/do
 With `typed-evals[calibration]`, use `EvaluationPipeline` to fit per-metric isotonic curves against representative human pass/fail labels. Inspect the held-out diagnostics, save the fitted artifact, and load it for later evaluations. Calibration is opt-in; improvements are measured on held-out data rather than assumed.
 
 Read the [calibration walkthrough](https://github.com/TrustifAI/typed_evals/blob/main/docs/CALIBRATION.md) for fitting, validation, and saved artifacts. The included labeled datasets are synthetic examples; replace them with human-reviewed labels for your application.
+
+For Decisions, install `typed-evals[openai,calibration]` and fit a separate artifact with `backend=OpenAIDecisionsBackend()` or `typed_evals calibrate ... --backend openai-decisions`. Calibration uses raw metric scores, never provider confidence. New v2 artifacts record backend/compiler provenance and ordered request configuration; provider or compiler changes require a refit, while threshold changes do not. V1 artifacts remain readable for the established Jev compiler and custom backends without provenance; they cannot establish Decisions compatibility and require a fresh Decisions fit. See [artifact compatibility](docs/CALIBRATION.md#artifact-versions-and-compatibility).
 
 `metric.score` uses the raw score unless calibration is applied. `metric.passed` compares it with the threshold and is `None` for unavailable evaluations. Judge results can be wrong; individual checks do not establish a single probability that an entire answer is true.
 
@@ -332,14 +398,20 @@ Found a confusing result, need an integration, or have a useful evaluation examp
 From a repository checkout:
 
 ```bash
-python -m pip install -e '.[calibration,dev,langchain,crewai,agent-framework]'
+python -m pip install -e '.[openai,calibration,dev,langchain,agent-framework]'
 pytest -m "not live" --cov=typed_evals --cov-report=term-missing
 ruff check .
 ruff format --check .
 python -m build
 ```
 
-CI runs the framework integrations with fake judges. Tests for optional frameworks are skipped when those extras are absent. The separate live smoke test requires both `TYPED_EVALS_LIVE=1` and `TYPESAFE_API_KEY` and makes a billable request. Maintainers can follow the [publishing guide](https://github.com/TrustifAI/typed_evals/blob/main/docs/PUBLISHING.md) to cut a release.
+CI installs the OpenAI extra and runs both providers' contract tests against mocked HTTP, along with framework integrations using fake judges. CrewAI tests run in a separate environment with `.[calibration,dev,crewai]` because its SDK bounds currently conflict with Decisions. Normal tests need no credentials or paid calls. Tests for optional frameworks are skipped when those extras are absent. The separate Jev live smoke test requires both `TYPED_EVALS_LIVE=1` and `TYPESAFE_API_KEY` and makes a billable request. Decisions' three-question text smoke test is disabled by default; to opt into its billable request after setting `OPENAI_API_KEY`, run:
+
+```bash
+TYPED_EVALS_OPENAI_LIVE=1 pytest tests/test_live.py::test_live_openai_decisions_smoke -m live
+```
+
+It defaults to `gpt-6-luna`; `TYPED_EVALS_OPENAI_MODEL` optionally selects another model ID. Live smoke tests check the service contract rather than metric accuracy. Maintainers can follow the [publishing guide](https://github.com/TrustifAI/typed_evals/blob/main/docs/PUBLISHING.md) to cut a release.
 
 ---
 

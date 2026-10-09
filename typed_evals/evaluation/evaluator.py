@@ -10,17 +10,20 @@ from pydantic import JsonValue
 
 from typed_evals._utils import run_sync
 from typed_evals.backends import Backend, JevBackend, JudgeSession, Question
+from typed_evals.backends.capabilities import validate_evidence
+from typed_evals.backends.provenance import backend_provenance
 from typed_evals.data.datasets import load_dataset
 from typed_evals.data.models import (
     EvaluationReport,
     EvaluationSample,
+    ImageInput,
     MetricResult,
     MetricSummary,
     SampleResult,
     ToolCall,
     ToolProposal,
 )
-from typed_evals.errors import InvalidAnswerError, MissingInputError
+from typed_evals.errors import DecisionRefusalError, InvalidAnswerError, MissingInputError
 from typed_evals.metrics import AnswerRelevancy, Metric
 from typed_evals.metrics.base import _copy_metric
 from typed_evals.metrics.presets import Preset, preset_metrics
@@ -94,11 +97,15 @@ class Evaluator:
         samples = tuple(samples)
         if any(not isinstance(sample, EvaluationSample) for sample in samples):
             raise TypeError("Pass EvaluationSample objects; use load_dataset for JSON/JSONL files")
+        questions = {metric.name: metric.question() for metric in self.metrics}
         if calibration is not None:
-            calibration.validate_for(self.metrics, self.backend.model)
+            calibration.validate_for(
+                self.metrics,
+                self.backend.model,
+                backend_provenance=backend_provenance(self.backend, questions),
+            )
             if not allow_calibration_overlap:
                 calibration.check_overlap(samples)
-        questions = {metric.name: metric.question() for metric in self.metrics}
         prepared: list[tuple[dict[str, Any], dict[str, Question], dict[str, MetricResult]]] = []
         for sample in samples:
             active, skipped, fields = {}, {}, set()
@@ -117,7 +124,10 @@ class Evaluator:
                 else:
                     active[metric.name] = questions[metric.name]
                     fields.update(metric.required_fields)
-            prepared.append((sample.state(fields), active, skipped))
+            state = sample.state(fields)
+            if active:
+                validate_evidence(self.backend, state)
+            prepared.append((state, active, skipped))
         results: list[SampleResult | None] = [None] * len(samples)
         pending = iter(range(len(samples)))
 
@@ -195,8 +205,13 @@ class Evaluator:
                     if metric.name not in questions:
                         continue
                     try:
+                        unavailable = getattr(response, "answer_errors", {}).get(metric.name)
+                        if unavailable == "refusal":
+                            raise DecisionRefusalError(f"{metric.name}: provider refused judgment")
+                        if unavailable is not None:
+                            raise InvalidAnswerError(f"{metric.name}: invalid provider answer")
                         if metric.name not in response.answers:
-                            raise InvalidAnswerError(f"Jev omitted {metric.name}")
+                            raise InvalidAnswerError(f"Judge omitted {metric.name}")
                         data = metric.read_answer(response.answers[metric.name])
                     except InvalidAnswerError as exc:
                         if self.errors == "raise":
@@ -253,6 +268,7 @@ class _DirectOptions(_EvaluationOptions, total=False):
     input: str
     response: str
     contexts: Sequence[str]
+    images: Sequence[ImageInput | dict[str, Any]]
     reference: str | None
     trace: Sequence[ToolCall | dict[str, Any]]
     expected_outcome: str | None

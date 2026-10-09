@@ -83,15 +83,121 @@ result = production.evaluate_one(sample)  # A sample outside the fitting/validat
 ```
 
 Changing metric wording, criteria, evidence fields, version, question panel/order,
-or the requested/observed model version invalidates the artifact. Changing an
+backend/compiler configuration, or the requested/observed model version invalidates
+the artifact. Changing an
 acceptance threshold does not. Save custom metric definitions in your own source
 alongside the artifact. JSON knots are validated and restored without pickle.
+
+## Fit Decisions calibration separately
+
+Install `python -m pip install 'typed-evals[openai,calibration]'` and set
+`OPENAI_API_KEY`. Pass the same Decisions backend for fitting and later inference:
+
+```python
+from typed_evals import (
+    AnswerRelevancy,
+    CalibrationConfig,
+    EvaluationPipeline,
+    Faithfulness,
+    OpenAIDecisionsBackend,
+    load_calibration_dataset,
+)
+
+pipeline = EvaluationPipeline(
+    [Faithfulness(threshold=0.8), AnswerRelevancy(threshold=0.8)],
+    backend=OpenAIDecisionsBackend(model="gpt-6-luna"),
+    calibration=CalibrationConfig(enabled=True),
+)
+pipeline.fit(load_calibration_dataset("examples/assets/labeled.jsonl"))
+pipeline.save_calibration("openai-calibration.json")
+
+production = EvaluationPipeline(
+    [Faithfulness(threshold=0.9), AnswerRelevancy(threshold=0.9)],
+    backend=OpenAIDecisionsBackend(model="gpt-6-luna"),
+    calibration=CalibrationConfig(enabled=True),
+).load_calibration("openai-calibration.json")
+```
+
+Or use the CLI, which selects `gpt-6-luna` when `--model` is omitted:
+
+```bash
+typed_evals calibrate examples/assets/labeled.jsonl --backend openai-decisions \
+  --metrics faithfulness answer_relevancy --output openai-calibration.json
+typed_evals evaluate examples/assets/test.jsonl --backend openai-decisions \
+  --metrics faithfulness answer_relevancy --calibration openai-calibration.json \
+  --threshold 0.9 --output openai-report.json
+```
+
+This uses the same algorithm and raw-score target as Jev. Decisions Choice/Score
+confidence remains a separate provider value and never enters fitting. A labeled
+refusal or unavailable judgment fails the fit; the previous successful in-memory
+bundle remains intact. Model identity and dataset/group overlap checks continue
+to apply.
+
+## Artifact versions and compatibility
+
+New fits save `schema_version: 2` with explicit `backend_provenance`. Bundled
+backends supply a verified configuration and its SHA-256 fingerprint: provider,
+backend identity, compiler version, score-affecting static configuration, and the
+ordered compiled questions. The fingerprint describes translation rules and
+question configuration, not sample contents. Credentials, timeouts, retries, and
+decision thresholds are excluded. Changing a threshold alone therefore remains
+compatible; changing provider, compiler, or question translation requires a refit.
+Decisions also binds calibration to its effective endpoint, including an injected
+client's endpoint or `OPENAI_BASE_URL`; credentials in URL userinfo, query, and
+fragment are excluded. Keep any additional caller-controlled routing behavior
+stable when reusing a fitted curve.
+
+Third-party backends implementing only `model` and `session()` remain supported.
+Their new artifacts carry `status: "unknown"`, rather than fabricated provider
+metadata, and retain the existing model, metric, ordering, evidence, and overlap
+checks. Unknown provenance is compatible only with unknown provenance; it cannot
+be transferred to a verified bundled provider. For verified v2 artifacts, direct
+`CalibrationBundle.validate_for(...)` callers must also supply current backend
+provenance. Evaluators and pipelines supply it automatically.
+
+V1 artifacts remain readable without rewriting or inventing historical metadata.
+They retain established compatibility with Jev's original compiler (`"1"`) and
+custom backends that expose no provenance capability, subject to all existing
+checks. They cannot prove Decisions compatibility, even if a model ID is edited
+to match. Loading one with Decisions or another provenance-aware backend requires
+a fresh fit from labeled data and gives a clear refit error. There is no bypass
+switch or automatic conversion of an old curve into verified Decisions calibration.
+
+## Image evidence and calibration
+
+Image-selecting metrics use the same human pass/fail labels and fitting algorithm
+as text metrics. Include `"images"` in their `required_fields`, put `ImageInput`
+objects in each sample's `images`, and fit with an image-capable backend. Keep
+representative image quality, detail settings, and visual tasks in both training
+and held-out data. A curve fitted on a text rubric does not establish calibration
+for a new visual rubric.
+
+The reserved-sample hashes include the selected images' inline content, order,
+detail, and optional labels. Changing only sample IDs or a local source file's
+path does not make the same image evidence independent. These checks detect exact
+evidence duplication, not perceptually similar images, crops, or re-encoded copies;
+use `group_id` for related images and versions of the same source document.
+Unselected images do not enter text-only evidence hashes.
+
+Image-selecting metrics use metric fingerprint schema version 3, and Decisions
+records its multimodal compiler configuration for those panels. Existing
+text-only panels retain their established metric fingerprints and Decisions
+compiler identity, so adding image support does not itself invalidate text-only
+artifacts. Changing required fields or provider translation still requires a
+refit. Compiler provenance describes how images are translated, not the image
+data in any particular sample.
+
+Saved calibration artifacts and evaluation reports contain no raw image payloads.
+As with text evidence, selected images are supplied to the judge provider for
+fitting and inference. Save the labeled dataset separately if you need to
+reproduce a fit.
 
 ## The statistical target
 
 For each metric m, annotate independent samples with y_m ∈ {0, 1}, where 1 means
 the sample satisfies the metric's documented pass definition. Let s_m be its raw
-Jev signal. The fitted monotone mapping estimates:
+judge signal. The fitted monotone mapping estimates:
 
 `g_m(s_m) ≈ P(y_m = 1 | s_m)`.
 
@@ -113,7 +219,7 @@ event; it is not fitted against fractional ordinal labels.
    Brier score, log loss, ECE, and reliability bins for each metric.
 6. Atomically replace the in-memory bundle after all metrics succeed. Save it
    explicitly to a versioned JSON artifact for reuse.
-7. For unseen samples, check metric and model identity, then interpolate the
+7. For unseen samples, check metric, model, and backend provenance, then interpolate the
    stored knots and apply each metric's configured threshold.
 
 The stored predictor matches scikit-learn's linear interpolation between learned
@@ -158,7 +264,8 @@ uninformative judge. Calibration on one domain is not a guarantee for another.
 
 ## Operational contract
 
-The bundle records requested and observed model IDs, ordered metric fingerprints,
+The bundle records requested and observed model IDs, backend/compiler provenance,
+ordered metric fingerprints,
 fitting counts, validation metrics, creation time, and hashes of reserved samples
 and declared groups. Fingerprints include wording, criteria, required fields,
 pass options, pass definition, metric version, and the evaluation instruction

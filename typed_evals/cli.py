@@ -4,7 +4,7 @@ import argparse
 import json
 import sys
 
-from typed_evals.backends import JevBackend
+from typed_evals.backends import JevBackend, OpenAIDecisionsBackend
 from typed_evals.calibration import CalibrationConfig
 from typed_evals.data.datasets import load_calibration_dataset, load_dataset
 from typed_evals.evaluation.pipeline import EvaluationPipeline
@@ -13,7 +13,7 @@ from typed_evals.metrics import BUILTIN_METRICS
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="typed_evals", description="Evaluate LLM/agent responses with Jev"
+        prog="typed_evals", description="Evaluate LLM/agent responses with a typed judge backend"
     )
     commands = parser.add_subparsers(dest="command", required=True)
     for command in ("evaluate", "calibrate"):
@@ -22,7 +22,8 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument(
             "--metrics", nargs="+", choices=sorted(BUILTIN_METRICS), default=["answer_relevancy"]
         )
-        sub.add_argument("--model", default="jev-1.13.0")
+        sub.add_argument("--backend", choices=["jev", "openai-decisions"], default="jev")
+        sub.add_argument("--model", help="Model ID; defaults to the selected backend's model")
         sub.add_argument("--concurrency", type=int, default=8)
         sub.add_argument("--threshold", type=float, default=0.5)
         sub.add_argument("--output", required=True)
@@ -42,7 +43,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         metrics = [BUILTIN_METRICS[name](threshold=args.threshold) for name in args.metrics]
-        backend = JevBackend(model=args.model)
+        backend_class = JevBackend if args.backend == "jev" else OpenAIDecisionsBackend
+        backend = backend_class(**({"model": args.model} if args.model is not None else {}))
         if args.command == "calibrate":
             pipeline = EvaluationPipeline(
                 metrics,
@@ -93,5 +95,10 @@ def main(argv: list[str] | None = None) -> int:
             "use the Python API for exception details.",
             file=sys.stderr,
         )
+        if args.backend == "openai-decisions" and isinstance(exc, ImportError):
+            print(
+                "Install native Decisions support with: python -m pip install 'typed-evals[openai]'",
+                file=sys.stderr,
+            )
         return 2
     return 0

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "typed_evals"
-version = "0.1.0"
+version = "0.2.0"
 description = "Evaluation for LLM and Agents using System One Models, with opt-in isotonic calibration."
 readme = "README.md"
 authors = [
@@ -24,6 +24,7 @@ classifiers = [
 Author = "https://github.com/Aaryanverma"
 
 [project.optional-dependencies]
+openai = ["openai>=3.26.0,<4"]
 calibration = ["scikit-learn>=1.4,<2"]
 langchain = ["langchain>=1,<2"]
 crewai = ["crewai>=1.15.22,<2"]
@@ -44,7 +45,7 @@ typed_evals = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-markers = ["live: opt-in paid Jev API smoke tests"]
+markers = ["live: opt-in paid provider API smoke tests"]
 addopts = "-ra"
 
 [tool.ruff]

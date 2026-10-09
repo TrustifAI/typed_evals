@@ -1,4 +1,4 @@
-"""Public errors; provider exceptions remain available as exception causes."""
+"""Public errors; native Decisions transport messages withhold provider contents."""
 
 
 class TypedEvalsError(Exception):
@@ -9,8 +9,20 @@ class MissingInputError(TypedEvalsError, ValueError):
     """A metric is missing evidence required to evaluate it."""
 
 
+class UnsupportedModalityError(TypedEvalsError, ValueError):
+    """A backend cannot evaluate a selected evidence modality."""
+
+
 class InvalidAnswerError(TypedEvalsError, ValueError):
-    """Jev returned an incomplete or inconsistent answer."""
+    """A judge returned an incomplete or inconsistent answer."""
+
+
+class DecisionRefusalError(InvalidAnswerError):
+    """The Decisions provider declined an independently named judgment."""
+
+
+class OpenAIDecisionsError(TypedEvalsError):
+    """A Decisions transport failure, with provider response contents withheld."""
 
 
 class CalibrationError(TypedEvalsError, ValueError):

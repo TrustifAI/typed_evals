@@ -1,10 +1,48 @@
 # Evaluation inside agent execution
 
-`RuntimeGuard` runs Jev at checkpoints chosen by your application. A checkpoint
+`RuntimeGuard` runs the configured judge backend at checkpoints chosen by your application. A checkpoint
 maps to a `GuardPolicy`, which accepts either an `Evaluator` or a fitted
 `EvaluationPipeline`. It uses the same custom metrics, evidence validation,
 thresholds, backend configuration, and optional calibration as offline evaluation.
 There are no agent-framework dependencies and no implicit global hooks.
+
+Jev remains the default. For native Decisions, install `typed-evals[openai]`, set
+`OPENAI_API_KEY`, and pass `backend=OpenAIDecisionsBackend()` to `guard_tool`, an
+`Evaluator`, or an `EvaluationPipeline`. The same backend is accepted by framework
+adapters when their dependency versions permit it. For example:
+
+```python
+from typed_evals import OpenAIDecisionsBackend, guard_tool
+
+
+@guard_tool(
+    policy="Only read tickets owned by Alice.",
+    input="Read my ticket T-42.",
+    contexts=["Authenticated customer: Alice. Alice owns T-42."],
+    backend=OpenAIDecisionsBackend(),
+)
+def read_ticket(ticket_id: str) -> str:
+    return ticket_store.read_authorized("Alice", ticket_id)
+```
+
+Decisions refusals and malformed/unavailable judgments follow `on_error`; the
+default `"block"` prevents tool execution. Recording evaluation errors preserves
+successful sibling metrics but does not produce an overall passing sample. An
+explicit `on_error="annotate"` permits an unavailable judgment under the existing
+policy. For calibration, fit a separate Decisions artifact with compatible backend
+and compiler provenance. Provider confidence is separate from raw/calibrated
+scores and never changes threshold semantics.
+
+The Python error types live in `typed_evals.errors`: `DecisionRefusalError`
+identifies a refused question, while `OpenAIDecisionsError` identifies SDK
+transport failure after retries. Their messages omit provider response/refusal
+contents; the transport wrapper suppresses the SDK exception chain. Both follow
+the existing unavailable-judgment policy at runtime.
+
+Runtime wrappers retain the public `metadata["jev"]` key for backward
+compatibility, including when the selected backend is Decisions or custom. This
+is a legacy container name; inspect the evaluation's actual model and metric data
+instead of inferring provider identity from that key.
 
 For one tool, start with [Guard a Python tool](#guard-a-python-tool) or the
 [LangChain adapter](#langchain-tools). For custom metric panels, calibrated scores,
@@ -76,7 +114,7 @@ def read_ticket(ticket_id: str, runtime: ToolRuntime) -> str:
 The `runtime: ToolRuntime` parameter uses LangChain's
 [runtime injection](https://reference.langchain.com/python/langgraph.prebuilt/tool_node/ToolRuntime).
 The adapter preserves the annotation so LangChain excludes it from the model's
-tool schema. Jev receives the latest human message's text, the tool's public
+tool schema. The judge receives the latest human message's text, the tool's public
 arguments and description, and your explicitly supplied evidence. It does not
 automatically receive runtime state, configuration, or credentials.
 
@@ -106,7 +144,7 @@ how each framework reports a blocked tool call.
 
 ```mermaid
 flowchart LR
-    P[Proposed action and evidence] --> J[Jev metrics and optional calibration]
+    P[Proposed action and evidence] --> J[Judge metrics and optional calibration]
     J --> D{Checkpoint policy}
     D -->|allow or annotate| E[Execute once]
     D -->|block, retry, escalate| H[Return control to host]
@@ -205,7 +243,7 @@ Annotations on Python function parameters are not runtime type validation; enfor
 tool schemas and access controls in your dispatcher as well.
 
 `call_tool` snapshots the selected callable and nested JSON arguments before
-awaiting Jev. Mutating the original proposal or registry during evaluation cannot
+awaiting the judge. Mutating the original proposal or registry during evaluation cannot
 change that dispatch. Supply current, application-owned tool specifications,
 authorization facts, and known argument values as evidence. The tool must still
 enforce authorization against current state when it executes; a judgment is not
@@ -259,7 +297,7 @@ print(response.output)  # The exact native object.
 print(response.metadata["jev"]["hallucination_suspected"])
 ```
 
-`hallucination_suspected` is `True` when Jev fails `faithfulness` or
+`hallucination_suspected` is `True` when the judge fails `faithfulness` or
 `tool_grounding` at the configured threshold, `False` when the evaluated grounding
 checks pass, and `None` when no grounding check yields a usable conclusion.
 It is a judge's evidence-relative finding, not an independent determination of
@@ -291,7 +329,7 @@ or `"retry"` to let the host regenerate and recheck them.
 | `escalate` | No | Route the decision to an application-owned approval flow |
 
 `on_fail` and `on_error` default to `block`. Errors include judge exceptions,
-timeouts, skipped evidence, and unusable results. Annotation of an error requires
+timeouts, skipped evidence, Decisions refusals, and unusable results. Annotation of an error requires
 an explicit `on_error="annotate"`; this permits an unevaluated result and retains
 the error in metadata. Calibration configuration/drift errors always propagate,
 even with annotation enabled. Cancellation propagates as cancellation.
@@ -396,7 +434,7 @@ whole response. The guard does not automatically redact or rewrite content.
 `guarded_agent` applies the same guard to **existing agent instances, class
 constructors, factory functions, and invocation functions**. It creates a
 `GuardedAgent` proxy for instances, so the original framework object and its
-internal method calls retain their native behavior. Jev does not import or patch
+internal method calls retain their native behavior. Typed Evals does not import or patch
 framework internals.
 
 ```python
@@ -515,7 +553,7 @@ tool decorator outside `@guarded_by` so it registers the guarded callable. Suppl
 actual request and authorization evidence in your mapper; the literals above
 illustrate a single-customer example. Ordinary callable wrappers rely on that
 mapper accurately describing their arguments. Use `guard.call_tool` in a
-dispatcher adapter when Jev should snapshot and bind the exact JSON arguments.
+dispatcher adapter when Typed Evals should snapshot and bind the exact JSON arguments.
 
 Every enforced decision inside a decorated invocation is collected using scoped
 context, including checks from nested tool decorators, `enforce`, and `call_tool`.
@@ -538,7 +576,7 @@ the dispatcher continuation; those decisions are also collected by the decorator
 The runnable [decorated_agent.py](../examples/decorated_agent.py) demonstrates
 agent construction, native tool results, blocked calls, and response metadata.
 
-Jev judgments add latency and can be wrong, including on adversarial evidence.
+Judge requests add latency and can be wrong, including on adversarial evidence.
 Test policies and thresholds on representative labeled data. The runtime layer
 enforces the configured decisions; the underlying prompts are not a proven
 prompt-injection defense or a substitute for deterministic permissions.

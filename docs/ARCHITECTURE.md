@@ -6,7 +6,7 @@ backend adapter, metric definitions, and an optional `CalibrationBundle`.
 ```mermaid
 flowchart TD
     A[Validated samples] --> B[Metric evidence checks]
-    B --> C[One Jev request per sample]
+    B --> C[One judge request per sample]
     C --> D[Validated raw metric signals]
     D --> E{Calibration enabled?}
     E -->|No| F[Raw scores]
@@ -24,12 +24,13 @@ flowchart TD
 
 | Module | Responsibility |
 |---|---|
-| `data/models.py` | Validated samples, observed tool calls, labels, metric/sample results, summaries |
+| `data/models.py` | Validated samples and image inputs, observed tool calls, labels, metric/sample results, summaries |
 | `data/datasets.py` | Validated JSON and JSONL interchange |
 | `metrics/base.py` | Custom metric model, validation, signal extraction, and reload handling |
 | `metrics/rag.py`, `metrics/agents.py` | Built-in response, RAG, agent, and policy rubrics |
 | `metrics/registry.py`, `metrics/presets.py` | CLI metric registry and fixed evaluation panels |
 | `backends/jev.py` | Official SDK adapter and backend/session protocols |
+| `backends/openai_decisions.py` | Native Decisions compilation, strict answer validation, and flat usage conversion |
 | `evaluation/evaluator.py` | Preflight, fixed worker pool, per-sample batching, error policy, aggregation |
 | `evaluation/pipeline.py` | Opt-in lifecycle, independent split, fitting, save/load, automated run |
 | `evaluation/decorators.py` | Sync/async decorators preserving native outputs |
@@ -50,6 +51,7 @@ Direct implementation imports moved with the files: use
 `typed_evals.evaluation.evaluator` instead of `typed_evals.evaluator`.
 
 Importing the core package or an adapter module does not import an agent framework.
+It does not import OpenAI either; the optional SDK loads when Decisions is used.
 The CrewAI decorator loads CrewAI when creating a native tool. The LangChain and
 Microsoft adapters operate on the runtime objects injected by their frameworks.
 See the [adapter guide](ADAPTERS.md) for the integration contracts.
@@ -63,15 +65,38 @@ manager yielding a `JudgeSession`. The session implements:
 async def judge(state: dict, questions: Mapping[str, Question]) -> JudgeResponse: ...
 ```
 
-`Question` is an official SDK Noul, Choice, or Score object. `JudgeResponse`
+`Question` is a TypeSafe SDK Noul, Choice, or Score object. `JudgeResponse`
 contains the actual model ID, typed-answer dictionaries, and optional usage.
 The fake backend in `examples/offline_demo.py` demonstrates the contract.
 
-`JevBackend(client=existing_async_client)` allows custom transports, endpoints,
-or caller-owned SDK configuration. The caller closes that client. Its timeout
-and retry settings supersede `JevBackend.timeout` / `max_retries`; the adapter
-still passes its explicit `model` on each request. Use a supplied async client
-inside its owning event loop.
+Image support is an optional backend capability:
+
+```python
+supported_modalities = frozenset({"text", "image"})
+```
+
+Backends without `supported_modalities` are treated as text-capable, preserving the
+existing protocol. Decisions advertises text and image support; Jev currently
+advertises text only. The evaluator checks selected modalities before opening a
+session. An optional `validate_state(state)` hook lets a backend preflight its
+provider-specific limits across the whole batch before any requests. Unselected
+images do not affect text requests or require an image-capable backend.
+
+Images live in the shared `EvaluationSample.images` field as validated
+`ImageInput(data_url=..., detail=..., label=...)` objects. The selected evidence
+state contains their ordered JSON-compatible representation. An image-capable
+adapter translates that state into its own wire format and applies its own limits.
+A future Jev adapter can advertise image support and translate this same state;
+sample construction, `Metric.required_fields`, and evaluation entry points remain
+the same. Built-in metrics and presets retain their existing required fields.
+
+`JevBackend(client=existing_async_client)` and
+`OpenAIDecisionsBackend(client=existing_async_openai_client)` allow custom
+transports, endpoints, or caller-owned SDK configuration. The caller closes that
+client. Its timeout and retry settings supersede the backend's `timeout` /
+`max_retries`; each adapter still passes its explicit `model` on every request.
+Use a supplied async client inside its owning event loop. Jev remains the default;
+Decisions defaults to `gpt-6-luna` and requires `typed-evals[openai]`.
 
 Without an injected client, each evaluation batch creates and closes a pooled
 client, including on exceptions or cancellation. Sync entry points use
@@ -83,6 +108,55 @@ await the async APIs to keep notebook/server event loops responsive. Supplied
 async clients and custom backends with resources tied to a loop must use the
 async APIs in their owning loop.
 
+### Native Decisions translation
+
+Decisions uses the official OpenAI Python SDK `>=3.26.0,<4` and its dedicated
+`await client.decisions.create(...)` endpoint, `POST /v1/decisions`. The adapter
+uses the SDK's `with_raw_response.create(...)` wrapper to validate original JSON
+before SDK model coercion, retaining the same transport and retries. It
+serializes only the supplied evidence state deterministically, preserving Unicode,
+structured tool evidence, and complete instructions without truncation. It compiles
+all active questions into one request with unique metric names:
+
+| Metric primitive | Decisions question | Raw metric signal |
+|---|---|---|
+| Noul | Predicate; policy and true/false descriptions are included in instructions | Probability of the positive condition |
+| Choice | Original string keys and descriptions in deterministic choice order, 2–255 choices | Sum of probabilities of `pass_options` |
+| Score | Declared level order, stable stringified ordinal labels, original descriptions | Expected ordinal divided once by `number_of_levels - 1` |
+
+The backend returns the expected ordinal Score unchanged to the existing metric
+parser, which performs the sole normalization. Duplicate descriptions retain
+distinct ordinal labels. Strings such as `"true"` and `"false"` remain strings.
+Response association uses question names; duplicate, unexpected, or untrustworthy
+associations fail the request. Independently attributable answer errors and
+refusals can be recorded per metric. Distributions are validated before conversion
+to dictionaries, so duplicates and malformed wire values cannot disappear through
+coercion. Nested SDK usage is flattened into scalar counters. The response's actual
+model ID is retained.
+
+For image-selected state, Decisions builds one user message containing an
+`input_text` part for the JSON evidence followed by ordered `input_image` parts.
+The text identifies image positions and optional labels; base64 image data appears
+only in the native image parts. Image detail is preserved. The shared schema
+accepts inline PNG, JPEG, WebP, and GIF data URLs; Decisions validates its limit of
+128 selected images. Text-only state retains its existing request format.
+
+Calibration provenance is an optional backend capability, separate from the
+`Backend` protocol. Bundled adapters identify their provider, backend, compiler
+version, and ordered static question configuration; Decisions also records the
+effective endpoint (without URL userinfo, query, or fragment). The pipeline
+fingerprints that configuration without sample evidence, thresholds, credentials,
+or transport settings. Caller-owned clients with additional custom routing
+behavior must keep that behavior stable for a fitted curve. A third-party backend
+implementing only `model` and `session()` remains
+usable and produces an explicit unknown-provenance v2 artifact. See
+[version compatibility](CALIBRATION.md#artifact-versions-and-compatibility).
+
+Selecting images uses multimodal compiler provenance and metric fingerprint
+schema version 3. Text-only panels preserve their established compiler and metric
+fingerprints. Sample overlap hashes include selected image content, order, detail,
+and labels, while provenance and saved reports contain no raw image bytes.
+
 ## Behavior under failures
 
 - All sample input checks occur before the first request in an evaluation batch.
@@ -91,8 +165,16 @@ async APIs in their owning loop.
   authentication errors are not retried by the framework.
 - API failures raise by default. `errors="record"` records the exception type
   without copying provider response bodies into exported reports.
-- Partial response omissions are validated metric by metric. Invalid/missing
+- Decisions SDK transport failures become `OpenAIDecisionsError` after SDK
+  retries, with a safe type-only message and suppressed provider exception chain.
+  A per-question refusal uses `DecisionRefusalError`, a subclass of
+  `InvalidAnswerError`; refusal contents are withheld.
+- Jev partial response omissions are validated metric by metric. Decisions
+  missing, duplicate, or unexpected question names fail the entire request;
+  attributable malformed answers and refusals are handled per metric. Unavailable
   answers never become zero, an empty success, or a synthetic confidence value.
+- Decisions refusals are unavailable judgments. Recording one preserves successful
+  sibling metrics and leaves the sample's overall pass status unavailable.
 - If a worker raises, the remaining workers are cancelled and awaited before
   closing the client. Already-sent requests may still have been billed.
 - Calibration mismatch is always fatal, including in record-errors mode.
@@ -106,13 +188,14 @@ and task overhead. Report memory is O(number of samples × number of metrics);
 the API returns a materialized report. Process very large datasets in batches
 with `evaluate`, reusing the saved calibration bundle.
 
-Only the union of fields required by active metrics is sent to Jev. Unrelated
-metadata and labels are excluded. Raw responses are supplied to TypeSafe for
-evaluation; they are not redacted automatically. No execution logs, cache files,
+Only the union of fields required by active metrics is sent to the selected judge.
+Unrelated metadata and labels are excluded. Raw evidence is supplied to the
+selected provider for evaluation; it is not redacted automatically. No execution logs, cache files,
 or raw response text are persisted by default. Saved calibration artifacts contain
 knots, metrics, model IDs, diagnostics, and hashes, not raw training text.
 
-The metric registry supports all three Jev primitives. It does not generate claims,
+The metric registry supports Noul, Choice, and Score through both bundled providers.
+It does not generate claims,
 explanations, or chain-of-thought with another LLM. It does not reimplement framework
 callbacks or orchestrate an agent. `RuntimeGuard` can invoke an explicitly supplied
 operation/tool once after its checkpoint permits it, and gate materialized output
