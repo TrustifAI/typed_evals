@@ -24,11 +24,11 @@
   <img src="https://raw.githubusercontent.com/TrustifAI/typed_evals/main/docs/assets/readme-banner.svg" width="1200" alt="Know what passed. Decide what runs. Typed Evals takes your evidence through a metric panel and returns typed scores, thresholds, and status.">
 </p>
 
-Use **[Jev](https://typesafe.ai/)** by default, or native **[OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions)**, to judge generated responses and recorded agent executions. Check proposed tool calls before they run. Start with a preset, then bring your own metrics, thresholds, or judge backend as your application grows.
+Use **[Jev](https://typesafe.ai/)** by default, **[Microsoft Decision-1 on OpenRouter](https://openrouter.ai/microsoft/microsoft-decision-1)** through the same backend, or native **[OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions)**, to judge generated responses and recorded agent executions. Check proposed tool calls before they run. Start with a preset, then bring your own metrics, thresholds, or judge backend as your application grows.
 
 ## Quickstart
 
-Install with **Python 3.11+**. This quickstart uses the default Jev backend, which requires a [TypeSafe](https://typesafe.ai/) API key. To use OpenAI Decisions instead, set `OPENAI_API_KEY` and follow [Use OpenAI Decisions](#use-openai-decisions).
+Install with **Python 3.11+**. This quickstart uses the default Jev backend, which requires a [TypeSafe](https://typesafe.ai/) API key. For Microsoft Decision-1, follow [Use Microsoft Decision-1 on OpenRouter](#use-microsoft-decision-1-on-openrouter) with `OPENROUTER_API_KEY`. For OpenAI Decisions, set `OPENAI_API_KEY` and follow [Use OpenAI Decisions](#use-openai-decisions).
 
 ```bash
 python -m pip install typed-evals
@@ -55,6 +55,39 @@ for name, metric in result.metrics.items():
 That checks **faithfulness**, **answer relevancy**, and **context relevance** in one judge request. The default backend uses `jev-1.13.0` through the official `typesafe-sdk` 0.7.x; live examples make API calls using your account.
 
 **Want to explore without an API key?** Jump to the [offline demo](#try-it-offline).
+
+### Use Microsoft Decision-1 on OpenRouter
+
+Microsoft's [Decision-1 model](https://openrouter.ai/microsoft/microsoft-decision-1) works through `JevBackend` with [OpenRouter's TypeSafe-compatible System One endpoint](https://openrouter.ai/docs/guides/community/typesafe-sdk). Install `python-dotenv` to load a local `.env` file:
+
+```bash
+python -m pip install typed-evals python-dotenv
+export OPENROUTER_API_KEY='your-key'
+```
+
+```python
+import os
+
+from dotenv import load_dotenv
+
+from typed_evals import JevBackend, evaluate
+
+load_dotenv()
+backend = JevBackend(
+    model="microsoft/microsoft-decision-1",
+    base_url="https://openrouter.ai/api",
+    api_key=os.environ["OPENROUTER_API_KEY"],
+)
+result = evaluate(
+    input="What is the refund period?",
+    response="You can request a refund within 30 days.",
+    preset="response",
+    backend=backend,
+)
+print(result.passed)
+```
+
+You can also put `OPENROUTER_API_KEY=your-key` in `.env`; call `load_dotenv()` before reading it. The SDK appends `/v1/systemone`, giving `https://openrouter.ai/api/v1/systemone`. The `"response"` preset checks answer relevancy; use `"rag"` or `"agent"` with their required evidence for those workflows. Run [examples/openrouter_decision1.py](examples/openrouter_decision1.py) from a checkout for scores and pass/fail results. This uses the core TypeSafe SDK dependency and needs no additional provider SDK.
 
 ### Use OpenAI Decisions
 
@@ -330,6 +363,28 @@ An ordered `score` rubric produces a normalized expected level between `0` and `
 
 Pass `backend=JevBackend(model="...")` to choose a different Jev model, or `backend=OpenAIDecisionsBackend()` for native Decisions. Custom providers implement the public `Backend` and `JudgeSession` protocols and can be passed as `backend=` to evaluation and tool guards.
 
+For a model hosted at a TypeSafe-compatible endpoint, pass its API root and key:
+
+```python
+import os
+
+from typed_evals import JevBackend, evaluate
+
+result = evaluate(
+    input="What is the refund period?",
+    response="Refunds are allowed within 30 days.",
+    backend=JevBackend(
+        model="my-judge-model",
+        base_url="https://judge.example.com",
+        api_key=os.environ["MY_JUDGE_API_KEY"],
+    ),
+)
+```
+
+The SDK appends `/v1/systemone` to `base_url`; supply the API root, without that endpoint path. If omitted, `base_url` and `api_key` use `TYPESAFE_BASE_URL` and `TYPESAFE_API_KEY`, respectively. These environment variables also work with the CLI. The server must accept TypeSafe's `state`, `questions`, and `model` request and return its typed answers; an OpenAI-compatible chat endpoint needs a custom backend adapter. See [backend configuration](docs/EVALUATION.md#hosted-typesafe-compatible-models) for client injection.
+
+[Microsoft Decision-1 on OpenRouter](#use-microsoft-decision-1-on-openrouter) is a concrete example: use `model="microsoft/microsoft-decision-1"`, `base_url="https://openrouter.ai/api"`, and your OpenRouter API key with `JevBackend`.
+
 An adapter supplies a model ID, an async `session()` context manager, and `async judge(state, questions)` returning a `JudgeResponse`. It translates the TypeSafe SDK's Noul, Choice, and Score formats into provider requests and matching answers. Image-capable adapters also expose `supported_modalities={"text", "image"}` and translate selected `ImageInput` evidence into their provider's format; existing backends without that attribute remain text-capable. The `typesafe-sdk` dependency remains required for metric construction. OpenAI loads only when used; Jev and custom backends work without the `openai` extra. Both CLI commands accept `--backend jev` (default) or `--backend openai-decisions`; omitted `--model` uses that backend's default.
 
 See the [backend contract](https://github.com/TrustifAI/typed_evals/blob/main/docs/ARCHITECTURE.md#backend-interface) and [synthetic backend example](https://github.com/TrustifAI/typed_evals/blob/main/examples/offline_demo.py).
@@ -381,6 +436,7 @@ The [CrewAI](https://github.com/TrustifAI/typed_evals/blob/main/examples/crewai_
 | Start here | What you'll learn |
 | --- | --- |
 | [Evaluation](https://github.com/TrustifAI/typed_evals/blob/main/docs/EVALUATION.md) | Metrics, datasets, reports, custom checks, and CLI usage. |
+| [Microsoft Decision-1 on OpenRouter](examples/openrouter_decision1.py) | Evaluate a response through `JevBackend` with a custom base URL and OpenRouter API key. |
 | [Runtime guards](https://github.com/TrustifAI/typed_evals/blob/main/docs/RUNTIME.md) | Tool guards, agent decorators, and failure behavior. |
 | [Framework adapters](https://github.com/TrustifAI/typed_evals/blob/main/docs/ADAPTERS.md) | LangChain, CrewAI, and Microsoft Agent Framework integration. |
 | [Calibration](https://github.com/TrustifAI/typed_evals/blob/main/docs/CALIBRATION.md) | Human labels, held-out validation, and reusable artifacts. |
@@ -389,7 +445,7 @@ The [CrewAI](https://github.com/TrustifAI/typed_evals/blob/main/examples/crewai_
 | [Introductory notebook](https://github.com/TrustifAI/typed_evals/blob/main/notebooks/sample_notebook.ipynb) | An interactive introduction to evaluation. |
 | [Advanced notebook](https://github.com/TrustifAI/typed_evals/blob/main/notebooks/advanced_usage.ipynb) | Custom metrics, calibration, and agent integrations. |
 
-For notebooks, install the repository into the kernel's environment and run from the repository root. They use `python-dotenv` and make live requests with `TYPESAFE_API_KEY`. Calibration needs the `calibration` extra; the advanced agent sections also need `agent-framework`, `langchain`, `langchain-google-genai`, and Gemini credentials.
+For notebooks, install the repository into the kernel's environment and run from the repository root. They use `python-dotenv` and make live requests with `TYPESAFE_API_KEY` by default. The introductory notebook also includes Microsoft Decision-1 through OpenRouter using `OPENROUTER_API_KEY`. Calibration needs the `calibration` extra; the advanced agent sections also need `agent-framework`, `langchain`, `langchain-google-genai`, and Gemini credentials.
 
 ## Contribute
 

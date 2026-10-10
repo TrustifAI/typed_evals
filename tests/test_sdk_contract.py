@@ -43,12 +43,82 @@ def wire_response(answers):
     }
 
 
+@pytest.mark.parametrize(
+    "base_url,env_url,api_key,expected_url,expected_key",
+    [
+        (
+            "https://judge.example.test/gateway/",
+            "https://ignored.example.test",
+            "hosted-judge-key",
+            "https://judge.example.test/gateway/v1/systemone",
+            "hosted-judge-key",
+        ),
+        (
+            None,
+            "https://environment.example.test/",
+            None,
+            "https://environment.example.test/v1/systemone",
+            "environment-judge-key",
+        ),
+        (
+            None,
+            None,
+            "hosted-judge-key",
+            "https://api.typesafe.ai/v1/systemone",
+            "hosted-judge-key",
+        ),
+    ],
+)
+async def test_backend_owned_client_endpoint_and_credentials(
+    monkeypatch, sample, base_url, env_url, api_key, expected_url, expected_key
+):
+    from typed_evals.backends import jev
+
+    if env_url is None:
+        monkeypatch.delenv("TYPESAFE_BASE_URL", raising=False)
+    else:
+        monkeypatch.setenv("TYPESAFE_BASE_URL", env_url)
+    monkeypatch.setenv("TYPESAFE_API_KEY", "environment-judge-key")
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        assert request.method == "POST"
+        assert str(request.url) == expected_url
+        assert request.headers["Authorization"] == f"Bearer {expected_key}"
+        body = json.loads(request.content)
+        assert body["model"] == "my-judge-model"
+        assert body["state"]["response"] == sample.response
+        assert body["questions"]["answer_relevancy"]["type"] == "noul"
+        return httpx2.Response(
+            200,
+            json={
+                **wire_response({"answer_relevancy": {"type": "noul", "noul": 0.7}}),
+                "model": "my-judge-model",
+            },
+        )
+
+    http_client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+    monkeypatch.setattr(
+        jev,
+        "AsyncTypeSafeClient",
+        lambda **kwargs: AsyncTypeSafeClient(http_client=http_client, **kwargs),
+    )
+    backend = JevBackend(model="my-judge-model", api_key=api_key, base_url=base_url, max_retries=0)
+    result = await Evaluator(backend=backend).aevaluate_one(sample)
+    assert result.model == "my-judge-model"
+    assert result.metrics["answer_relevancy"].score == 0.7
+    assert len(requests) == 1
+    assert http_client.is_closed
+
+
 async def test_request_serialization_and_all_primitive_responses(sample):
     observed = []
 
     def handler(request):
         observed.append(json.loads(request.content))
         assert request.url.path == "/v1/systemone"
+        assert request.headers["Authorization"] == "Bearer test-only-not-a-real-key"
         return httpx2.Response(
             200,
             json=wire_response(
@@ -90,7 +160,12 @@ async def test_request_serialization_and_all_primitive_responses(sample):
         ),
     ]
     async with sdk_client(handler) as client:
-        report = await Evaluator(metrics, backend=JevBackend(client=client)).aevaluate([sample])
+        backend = JevBackend(
+            client=client,
+            base_url="https://unused.example.test/unused",
+            api_key="unused-key",
+        )
+        report = await Evaluator(metrics, backend=backend).aevaluate([sample])
         # Evaluator must not close a caller-owned SDK client.
         await client.system_one(state="test", questions={"test": AnswerRelevancy().question()})
     body = observed[0]

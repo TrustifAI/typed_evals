@@ -65,6 +65,7 @@ class JevBackend:
     timeout: float = 30.0
     max_retries: int = 2
     client: AsyncTypeSafeClient | None = field(default=None, repr=False)
+    base_url: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         import math
@@ -103,6 +104,7 @@ class JevBackend:
             return
         async with AsyncTypeSafeClient(
             api_key=self.api_key,
+            base_url=self.base_url,
             model=self.model,
             timeout=self.timeout,
             retry=RetryPolicy(max_retries=self.max_retries, timeout=self.timeout),
