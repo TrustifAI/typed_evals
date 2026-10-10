@@ -75,6 +75,97 @@ report.save("evaluation-report.json")
 # report = await evaluator.aevaluate(samples)
 ```
 
+### Hosted TypeSafe-compatible models
+
+Use `JevBackend` with your server's model ID, API root, and API key:
+
+```python
+import os
+
+from typed_evals import Evaluator, JevBackend
+
+evaluator = Evaluator(
+    backend=JevBackend(
+        model="my-judge-model",
+        base_url="https://judge.example.com",
+        api_key=os.environ["MY_JUDGE_API_KEY"],
+        timeout=30.0,
+        max_retries=2,
+    )
+)
+result = evaluator.evaluate_one(sample)
+```
+
+The SDK sends `POST https://judge.example.com/v1/systemone` with bearer-token
+authentication. `base_url` is the API root; the SDK appends `/v1/systemone`,
+including after any path prefix in your root. The server must accept the
+TypeSafe `state`, `questions`, and `model` payload and return TypeSafe-compatible
+Noul, Choice, and Score answers, plus the response model and usage. An
+OpenAI-compatible chat endpoint requires an adapter implementing `Backend`.
+
+If `base_url` or `api_key` is omitted, the SDK reads `TYPESAFE_BASE_URL` or
+`TYPESAFE_API_KEY`. An explicit value takes precedence. With no base URL set,
+the SDK uses the official TypeSafe endpoint. These environment variables also
+configure the default Jev backend and CLI.
+
+For additional SDK configuration, pass your own client:
+
+```python
+from typesafe_sdk import AsyncTypeSafeClient
+
+async with AsyncTypeSafeClient(
+    model="my-judge-model",
+    base_url="https://judge.example.com",
+    api_key=os.environ["MY_JUDGE_API_KEY"],
+) as client:
+    evaluator = Evaluator(backend=JevBackend(model="my-judge-model", client=client))
+    result = await evaluator.aevaluate_one(sample)
+```
+
+An injected client owns its base URL, credentials, retries, timeout, and
+lifecycle; `JevBackend` passes its `model` to each judgment call. Use it inside
+the client's owning event loop. The evaluator leaves that client open.
+
+#### Microsoft Decision-1 on OpenRouter
+
+[Microsoft Decision-1](https://openrouter.ai/microsoft/microsoft-decision-1)
+can use the same `JevBackend` through
+[OpenRouter's TypeSafe-compatible System One endpoint](https://openrouter.ai/docs/guides/community/typesafe-sdk).
+Install `python-dotenv` for `.env` loading and set
+`OPENROUTER_API_KEY` in your environment or `.env`:
+
+```python
+import os
+
+from dotenv import load_dotenv
+
+from typed_evals import JevBackend, evaluate
+
+load_dotenv()
+backend = JevBackend(
+    model="microsoft/microsoft-decision-1",
+    base_url="https://openrouter.ai/api",
+    api_key=os.environ["OPENROUTER_API_KEY"],
+)
+result = evaluate(
+    input="What is the refund period?",
+    response="You can request a refund within 30 days.",
+    preset="response",
+    backend=backend,
+)
+```
+
+This sends `POST https://openrouter.ai/api/v1/systemone`; supply
+`https://openrouter.ai/api` as the base URL. The model is served through
+`JevBackend`'s existing TypeSafe request and response contract. The core package
+already includes the provider SDK needed for this configuration.
+
+The `"response"` preset checks answer relevancy. The same backend can be passed
+to `Evaluator`, `EvaluationPipeline`, and runtime guards; select `"rag"` or
+`"agent"` and provide their required evidence when evaluating those workflows.
+See the [runnable example](../examples/openrouter_decision1.py) and
+[introductory notebook](../notebooks/sample_notebook.ipynb).
+
 ## Image evidence
 
 `EvaluationSample.images` is a tuple of provider-independent `ImageInput` objects;
@@ -399,6 +490,19 @@ from means, with separate counts.
 Both commands support `--backend jev` (default) and `--backend openai-decisions`.
 Omitting `--model` selects that backend's default; supplying it overrides the
 requested identifier. Fit and load Decisions calibration with the same backend.
+
+To evaluate with Microsoft Decision-1 on OpenRouter, map your exported OpenRouter
+key to the SDK's environment variable and provide the model ID:
+
+```bash
+TYPESAFE_BASE_URL='https://openrouter.ai/api' \
+TYPESAFE_API_KEY="$OPENROUTER_API_KEY" \
+typed_evals evaluate examples/assets/rag_samples.jsonl --backend jev \
+  --model microsoft/microsoft-decision-1 --metrics answer_relevancy \
+  --output openrouter-report.json
+```
+
+The CLI reads environment variables; it does not load `.env` itself.
 
 A Decisions refusal raises by default. With `errors="record"` / `--errors record`,
 the refused metric has status `"error"`, no score, and no pass decision, while

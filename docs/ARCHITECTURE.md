@@ -69,6 +69,15 @@ async def judge(state: dict, questions: Mapping[str, Question]) -> JudgeResponse
 contains the actual model ID, typed-answer dictionaries, and optional usage.
 The fake backend in `examples/offline_demo.py` demonstrates the contract.
 
+TypeSafe-compatible hosted models use `JevBackend` directly with `model`,
+`base_url`, and `api_key`. For Microsoft Decision-1 on OpenRouter, set
+`model="microsoft/microsoft-decision-1"` and
+`base_url="https://openrouter.ai/api"` with an OpenRouter API key. The TypeSafe
+SDK appends `/v1/systemone` and handles the existing typed question/answer
+protocol, so this configuration needs no custom adapter. See the
+[hosted-model guide](EVALUATION.md#hosted-typesafe-compatible-models) and
+[OpenRouter example](../examples/openrouter_decision1.py).
+
 Image support is an optional backend capability:
 
 ```python
