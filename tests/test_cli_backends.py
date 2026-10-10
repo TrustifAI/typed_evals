@@ -7,6 +7,56 @@ from typed_evals.backends import JevBackend, OpenAIDecisionsBackend
 from typed_evals.cli import main
 
 
+@pytest.mark.parametrize(
+    "algorithm,cutoff,expected",
+    [
+        ("auto", 2000, "venn_abers"),
+        ("auto", 20, "isotonic"),
+        ("venn_abers", 20, "venn_abers"),
+        ("isotonic", 2000, "isotonic"),
+    ],
+)
+def test_cli_calibration_algorithm_and_cutoff_reach_saved_predictor(
+    algorithm, cutoff, expected, scoring_backend, tmp_path, monkeypatch, capsys
+):
+    from conftest import calibrated_rows
+
+    import typed_evals.cli as cli
+
+    monkeypatch.setattr(cli, "JevBackend", lambda **kwargs: scoring_backend)
+    train, validation, output = (tmp_path / name for name in ("train.json", "val.json", "fit.json"))
+    train.write_text(json.dumps([row.model_dump(mode="json") for row in calibrated_rows()]))
+    validation.write_text(
+        json.dumps([row.model_dump(mode="json") for row in calibrated_rows("val")])
+    )
+    assert (
+        main(
+            [
+                "calibrate",
+                str(train),
+                "--validation-data",
+                str(validation),
+                "--output",
+                str(output),
+                "--min-samples",
+                "20",
+                "--min-validation-samples",
+                "10",
+                "--algorithm",
+                algorithm,
+                "--isotonic-min-samples",
+                str(cutoff),
+            ]
+        )
+        == 0
+    )
+    artifact = json.loads(output.read_text())
+    assert artifact["curves"]["answer_relevancy"]["algorithm"] == expected
+    assert (
+        json.loads(capsys.readouterr().out)["metrics"]["answer_relevancy"]["algorithm"] == expected
+    )
+
+
 @pytest.mark.parametrize("command", ["evaluate", "calibrate"])
 @pytest.mark.parametrize(
     "backend_name,backend_class,default_model",

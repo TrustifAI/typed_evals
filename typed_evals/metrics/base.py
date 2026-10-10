@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import sys
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
 from pydantic import BaseModel, Field, model_validator
 from typesafe_sdk import Choice, Noul, Score
@@ -13,6 +13,9 @@ from typesafe_sdk import Choice, Noul, Score
 from typed_evals._utils import digest
 from typed_evals.data.models import EvaluationSample, Model, Probability
 from typed_evals.errors import InvalidAnswerError
+
+if TYPE_CHECKING:
+    from typesafe_sdk import NoulCriteria
 
 EVIDENCE_FIELDS = {
     "input",
@@ -110,9 +113,14 @@ class Metric(Model):
         if "images" in self.required_fields:
             instructions["required_modalities"] = ["text", "image"]
         if self.kind == "noul":
-            return Noul(instructions=instructions, criteria=self.criteria)
+            assert self.criteria is None or isinstance(self.criteria, dict)
+            # validate_definition has checked the keys; preserve their supplied order.
+            criteria = cast("NoulCriteria | None", self.criteria)
+            return Noul(instructions=instructions, criteria=criteria)
         if self.kind == "choice":
+            assert isinstance(self.criteria, dict)
             return Choice(instructions=instructions, criteria=self.criteria)
+        assert isinstance(self.criteria, tuple)
         return Score(instructions=instructions, criteria=self.criteria)
 
     def read_answer(self, answer: dict[str, Any]) -> dict[str, Any]:
@@ -121,6 +129,7 @@ class Metric(Model):
             raise InvalidAnswerError(f"{self.name}: expected a {self.kind} answer")
         if self.kind == "noul":
             return {"raw_score": _probability(answer.get("noul")), "raw_kind": "event_probability"}
+        assert self.criteria is not None
         confidence = _probability(answer.get("confidence"))
         expected = (
             set(self.criteria)
@@ -135,11 +144,12 @@ class Metric(Model):
             raise InvalidAnswerError(f"{self.name}: probabilities do not match the rubric")
         # The API rounds probabilities. Tolerate rounding, never a materially broken distribution.
         total = sum(probabilities.values())
-        if not math.isclose(total, 1, abs_tol=0.005 * len(probabilities) + 1e-6):
+        tolerance = min(0.025, 0.005 * len(probabilities) + 1e-6)
+        if not math.isclose(total, 1, abs_tol=tolerance):
             raise InvalidAnswerError(f"{self.name}: probabilities do not sum approximately to one")
         if self.kind == "choice":
             choice = answer.get("choice")
-            if choice not in expected:
+            if not isinstance(choice, str) or choice not in expected:
                 raise InvalidAnswerError(f"{self.name}: selected choice is not in the rubric")
             if probabilities[choice] + 0.011 < max(probabilities.values()):
                 raise InvalidAnswerError(f"{self.name}: selected choice contradicts probabilities")
@@ -153,14 +163,12 @@ class Metric(Model):
             }
         levels = len(self.criteria) - 1
         score = answer.get("score")
-        if (
-            isinstance(score, bool)
-            or not isinstance(score, (int, float))
-            or not math.isfinite(score)
-        ):
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
             raise InvalidAnswerError(f"{self.name}: score must be finite")
         if not 0 <= score <= levels:
             raise InvalidAnswerError(f"{self.name}: score is outside the rubric")
+        if not math.isfinite(score):
+            raise InvalidAnswerError(f"{self.name}: score must be finite")
         expected_score = sum(int(key) * value for key, value in probabilities.items())
         tolerance = 0.01 + 0.005 * sum(range(levels + 1))
         if abs(score - expected_score) > tolerance:
@@ -202,6 +210,8 @@ def _copy_metric(metric: Any, *, index: int) -> Metric:
 def _probability(value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise InvalidAnswerError("Probability must be a finite number in [0, 1]")
-    if not math.isfinite(value) or not 0 <= value <= 1:
+    # Check bounds before isfinite: arbitrarily large JSON integers must become
+    # invalid answers rather than overflow during conversion to a float.
+    if not 0 <= value <= 1 or not math.isfinite(value):
         raise InvalidAnswerError("Probability must be a finite number in [0, 1]")
     return float(value)

@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import wraps
 from types import MappingProxyType
-from typing import Any, Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, TypeVar, cast
 from uuid import uuid4
 
 from pydantic import Field, JsonValue
@@ -25,6 +25,7 @@ from typed_evals.evaluation.decorators import ResponseEvaluator
 FailureAction = Literal["annotate", "retry", "escalate", "block"]
 Action = Literal["allow", "annotate", "retry", "escalate", "block"]
 _PRIORITY = {"allow": 0, "annotate": 1, "retry": 2, "escalate": 3, "block": 4}
+_FAILURE_ACTIONS = frozenset({"annotate", "retry", "escalate", "block"})
 T = TypeVar("T")
 
 
@@ -34,7 +35,9 @@ class _DecisionLog:
     active: bool = True
 
 
-_decision_log: ContextVar[_DecisionLog | None] = ContextVar("jev_decision_log", default=None)
+_decision_log: ContextVar[_DecisionLog | None] = ContextVar(
+    "typed_evals_decision_log", default=None
+)
 
 
 @contextmanager
@@ -74,7 +77,7 @@ class GuardPolicy:
     def __post_init__(self) -> None:
         actions = dict(self.metric_actions)
         for action in (self.on_fail, self.on_error, *actions.values()):
-            if not isinstance(action, str) or action not in _PRIORITY or action == "allow":
+            if not isinstance(action, str) or action not in _FAILURE_ACTIONS:
                 raise ValueError("failure actions must be block, annotate, retry, or escalate")
         if any(not isinstance(name, str) or not name.strip() for name in actions):
             raise ValueError("metric_actions keys must be nonempty metric names")
@@ -157,6 +160,7 @@ class GuardedResponse(Generic[T]):
 
     @property
     def metadata(self) -> dict[str, Any]:
+        """Provider-independent audit data, with the legacy ``jev`` alias retained."""
         flags = [decision.hallucination_suspected for decision in self.decisions]
         # An unavailable grounding check keeps the aggregate unknown unless another failed.
         relevant = [
@@ -173,12 +177,11 @@ class GuardedResponse(Generic[T]):
             if True in flags
             else (False if relevant and all(v is False for v in relevant) else None)
         )
-        return {
-            "jev": {
-                "decisions": [decision.to_dict() for decision in self.decisions],
-                "hallucination_suspected": suspected,
-            }
+        audit = {
+            "decisions": [decision.to_dict() for decision in self.decisions],
+            "hallucination_suspected": suspected,
         }
+        return {"typed_evals": audit, "jev": audit}
 
 
 class RuntimeGuard:
@@ -297,6 +300,7 @@ class RuntimeGuard:
         output = operation()
         _materialized(output)
         if after is not None:
+            assert sample_builder is not None  # Established by _validate_operation.
             decisions.append(self.enforce(after, sample_builder(output, snapshot)))
         return GuardedResponse(output, tuple(decisions))
 
@@ -316,6 +320,7 @@ class RuntimeGuard:
         output = await _invoke(operation)
         _materialized(output)
         if after is not None:
+            assert sample_builder is not None  # Established by _validate_operation.
             decisions.append(await self.aenforce(after, sample_builder(output, snapshot)))
         return GuardedResponse(output, tuple(decisions))
 
@@ -327,6 +332,7 @@ class RuntimeGuard:
             raise ValueError("after and sample_builder must be provided together")
         if after is not None:
             self._policy(after)
+            assert builder is not None
             _sync_mapper(builder)
 
     def call_tool(
@@ -403,6 +409,7 @@ def guarded_by(
             raise ValueError("Each checkpoint requires its corresponding sample builder")
         if checkpoint is not None:
             guard._policy(checkpoint)
+            assert builder is not None
             _sync_mapper(builder)
 
     def decorator(function: Callable) -> Callable:
@@ -415,12 +422,14 @@ def guarded_by(
             async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
                 with _decision_scope() as decisions:
                     if before is not None:
+                        assert before_sample is not None  # Validated during decoration.
                         await guard.aenforce(before, before_sample(args, kwargs))
                     output = function(*args, **kwargs)
                     if inspect.isawaitable(output):
                         output = await output
                     _materialized(output)
                     if after is not None:
+                        assert after_sample is not None  # Validated during decoration.
                         await guard.aenforce(after, after_sample(output, args, kwargs))
                     return output if native_output else GuardedResponse(output, tuple(decisions))
 
@@ -430,10 +439,12 @@ def guarded_by(
         def wrapper(*args: Any, **kwargs: Any) -> Any:
             with _decision_scope() as decisions:
                 if before is not None:
+                    assert before_sample is not None  # Validated during decoration.
                     guard.enforce(before, before_sample(args, kwargs))
                 output = function(*args, **kwargs)
                 _materialized(output)
                 if after is not None:
+                    assert after_sample is not None  # Validated during decoration.
                     guard.enforce(after, after_sample(output, args, kwargs))
                 return output if native_output else GuardedResponse(output, tuple(decisions))
 
@@ -451,14 +462,14 @@ def _snapshot(sample: EvaluationSample) -> EvaluationSample:
 
 def _async_callable(function: Callable) -> bool:
     return inspect.iscoroutinefunction(function) or (
-        callable(function) and inspect.iscoroutinefunction(function.__call__)
+        callable(function) and inspect.iscoroutinefunction(cast(Any, function).__call__)
     )
 
 
 def _ordinary_callable(function: Callable) -> None:
     if not callable(function):
         raise TypeError("operation must be a lazy callable")
-    for candidate in (function, function.__call__):
+    for candidate in (function, cast(Any, function).__call__):
         if inspect.isgeneratorfunction(candidate) or inspect.isasyncgenfunction(candidate):
             raise TypeError("Streaming functions must be materialized before evaluation")
 
@@ -501,6 +512,7 @@ def _prepare_tool(tools: Mapping[str, Callable], sample: EvaluationSample) -> tu
 def _tool_result_builder(mapper: Callable[[Any], JsonValue] | None) -> Callable:
     def build(output: Any, sample: EvaluationSample) -> EvaluationSample:
         proposal = sample.proposed_tool_call
+        assert proposal is not None  # _prepare_tool validates before dispatch.
         event = ToolCall(
             name=proposal.name,
             arguments=deepcopy(proposal.arguments),

@@ -1,4 +1,5 @@
 import json
+import warnings
 
 import pytest
 from pydantic import ValidationError
@@ -58,10 +59,58 @@ def test_existing_positional_metrics_and_empty_batch_are_compatible(sample, back
     assert backend.sessions == 1
 
 
-def test_default_does_not_infer_checks_from_extra_evidence(sample, backend):
-    result = evaluate(sample, backend=backend)
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("form", ["fields", "sample", "dict", "batch", "jsonl"])
+async def test_default_warns_without_inferring_checks_from_contexts(
+    sample, backend, tmp_path, form, asynchronous
+):
+    data = sample.model_dump(mode="json")
+    args, kwargs = (), {"backend": backend}
+    if form == "fields":
+        kwargs.update(data)
+    elif form == "jsonl":
+        path = tmp_path / "samples.jsonl"
+        path.write_text(json.dumps(data) + "\n")
+        args = (path,)
+    else:
+        args = ({"sample": sample, "dict": data, "batch": [sample]}[form],)
+    with pytest.warns(UserWarning, match="contexts were supplied for 1 sample") as caught:
+        output = await aevaluate(*args, **kwargs) if asynchronous else evaluate(*args, **kwargs)
+    assert len(caught) == 1
+    result = output.results[0] if isinstance(output, EvaluationReport) else output
     assert set(result.metrics) == {"answer_relevancy"}
     assert backend.calls[0][0] == {"input": sample.input, "response": sample.response}
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_relevant_but_unsupported_answer_warns_and_needs_grounding_check(
+    backend, asynchronous
+):
+    backend.answer = lambda state, questions: {
+        name: {"type": "noul", "noul": 0.1 if name == "faithfulness" else 0.9} for name in questions
+    }
+    fields = {
+        "input": "What is the refund period?",
+        "response": "90 days.",
+        "contexts": ["Refunds within 30 days."],
+        "backend": backend,
+    }
+    with pytest.warns(UserWarning, match="contexts were supplied"):
+        default = await aevaluate(**fields) if asynchronous else evaluate(**fields)
+    assert default.passed is True
+    assert set(default.metrics) == {"answer_relevancy"}
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        grounded = (
+            await aevaluate(**fields, preset="rag")
+            if asynchronous
+            else evaluate(**fields, preset="rag")
+        )
+    assert grounded.passed is False
+    assert grounded.metrics["answer_relevancy"].passed is True
+    assert grounded.metrics["faithfulness"].passed is False
+    assert backend.calls[1][0]["contexts"] == fields["contexts"]
 
 
 @pytest.mark.parametrize(

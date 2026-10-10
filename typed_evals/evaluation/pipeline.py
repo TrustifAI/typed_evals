@@ -4,7 +4,7 @@ import random
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 from typed_evals._utils import digest, run_sync
 from typed_evals.backends import Backend
@@ -15,6 +15,7 @@ from typed_evals.calibration import (
     CalibrationReport,
     IsotonicCalibrator,
     MetricCalibrationReport,
+    VennAbersCalibrator,
     probability_diagnostics,
 )
 from typed_evals.data.models import (
@@ -112,6 +113,7 @@ class EvaluationPipeline:
             for name in row.labels:
                 if metric_map[name].missing_fields(row.sample):
                     raise CalibrationError(f"Labeled metric {name} lacks required sample evidence")
+        split: Literal["automatic_group_holdout", "explicit_holdout"]
         if validation_data is None:
             train, validation = self._split(data)
             split = "automatic_group_holdout"
@@ -130,12 +132,17 @@ class EvaluationPipeline:
             self._validate_counts(name, train, training=True)
             self._validate_counts(name, validation, training=False)
         # Fail before making billable requests if fitting dependencies are unavailable.
-        try:
-            from sklearn.isotonic import IsotonicRegression  # noqa: F401
-        except ImportError as exc:
-            raise CalibrationError(
-                "Install fitting dependencies with pip install 'typed_evals[calibration]'"
-            ) from exc
+        algorithms = {
+            name: self.config.algorithm_for(sum(name in row.labels for row in train))
+            for name in metric_map
+        }
+        if "isotonic" in algorithms.values():
+            try:
+                from sklearn.isotonic import IsotonicRegression  # noqa: F401
+            except ImportError as exc:
+                raise CalibrationError(
+                    "Install fitting dependencies with pip install 'typed_evals[calibration]'"
+                ) from exc
         provenance = backend_provenance(
             self.evaluator.backend,
             {metric.name: metric.question() for metric in self.evaluator.metrics},
@@ -156,7 +163,10 @@ class EvaluationPipeline:
         for name in metric_map:
             x_train, y_train = self._xy(name, train, raw.results[: len(train)])
             x_val, y_val = self._xy(name, validation, raw.results[len(train) :])
-            curve = IsotonicCalibrator.fit(x_train, y_train)
+            calibrator = (
+                IsotonicCalibrator if algorithms[name] == "isotonic" else VennAbersCalibrator
+            )
+            curve = calibrator.fit(x_train, y_train)
             before = probability_diagnostics(x_val, y_val, n_bins=self.config.n_bins)
             after = probability_diagnostics(
                 [curve.predict(value) for value in x_val], y_val, n_bins=self.config.n_bins
@@ -174,24 +184,30 @@ class EvaluationPipeline:
                 notes.append(
                     "Held-out Brier score did not improve; inspect this metric before deployment."
                 )
+            if after.log_loss >= before.log_loss:
+                notes.append(
+                    "Held-out log loss did not improve; inspect this metric before deployment."
+                )
             curves[name] = curve
             reports[name] = MetricCalibrationReport(
+                algorithm=curve.algorithm,
                 training_samples=len(x_train),
                 validation_samples=len(x_val),
                 training_positive_rate=sum(y_train) / len(y_train),
                 raw=before,
                 calibrated=after,
                 brier_improved=after.brier < before.brier,
+                log_loss_improved=after.log_loss < before.log_loss,
                 notes=tuple(notes),
             )
         report = CalibrationReport(
             split=split, random_state=self.config.random_state, metrics=reports
         )
         bundle = CalibrationBundle(
-            schema_version=2,
+            schema_version=3,
             created_at=datetime.now(UTC).isoformat(),
             requested_model=self.evaluator.backend.model,
-            observed_model=next(iter(actual_models)),
+            observed_model=cast(str, next(iter(actual_models))),
             metric_fingerprints={
                 metric.name: metric.fingerprint for metric in self.evaluator.metrics
             },
@@ -209,7 +225,9 @@ class EvaluationPipeline:
         self._bundle = bundle
         return report
 
-    def _split(self, data: tuple[CalibrationExample, ...]) -> tuple[tuple, tuple]:
+    def _split(
+        self, data: tuple[CalibrationExample, ...]
+    ) -> tuple[tuple[CalibrationExample, ...], tuple[CalibrationExample, ...]]:
         groups: dict[str, list[CalibrationExample]] = {}
         for row in data:
             key = row.sample.group_hash or row.sample.content_hash
@@ -321,7 +339,7 @@ class EvaluationPipeline:
 
     def save_calibration(self, path: str | Path) -> None:
         self._require_enabled()
-        bundle = self._active_bundle()
+        bundle = cast(CalibrationBundle, self._active_bundle())
         bundle.save(path)
 
     def load_calibration(self, path: str | Path) -> EvaluationPipeline:

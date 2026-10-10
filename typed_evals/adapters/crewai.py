@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, get_type_hints
+from typing import TYPE_CHECKING, Any, cast, get_type_hints
 
 from typed_evals.backends import Backend
 from typed_evals.data.models import ToolProposal
@@ -90,7 +90,8 @@ def guard_tool(
         registered = tool(tool_name)(wrapped)
         return GuardedTool(
             name=registered.name,
-            description=inspect.getdoc(function),
+            # CrewAI's tool decorator has already required the function's docstring.
+            description=cast(str, inspect.getdoc(function)),
             args_schema=registered.args_schema,
             result_schema=registered.result_schema,
             func=wrapped,

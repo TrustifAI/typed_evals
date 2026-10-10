@@ -115,7 +115,7 @@ async def main():
         result = await agent.run("What is my refund period?", ticket_id=ticket_id)
         print(ticket_id, result.output.text)
         print("Decisions:", [(d.checkpoint, d.action) for d in result.decisions])
-        print("Hallucination suspected:", result.metadata["jev"]["hallucination_suspected"])
+        print("Hallucination suspected:", result.metadata["typed_evals"]["hallucination_suspected"])
     print("Tools actually executed:", executed)
 
 

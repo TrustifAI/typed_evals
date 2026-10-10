@@ -1,4 +1,4 @@
-"""Typed judge evaluation, with optional per-metric isotonic calibration."""
+"""Typed judge evaluation, with optional per-metric probability calibration."""
 
 from typed_evals.backends import (
     Backend,
@@ -6,8 +6,14 @@ from typed_evals.backends import (
     JudgeResponse,
     JudgeSession,
     OpenAIDecisionsBackend,
+    SystemOneBackend,
 )
-from typed_evals.calibration import CalibrationBundle, CalibrationConfig, IsotonicCalibrator
+from typed_evals.calibration import (
+    CalibrationBundle,
+    CalibrationConfig,
+    IsotonicCalibrator,
+    VennAbersCalibrator,
+)
 from typed_evals.data.datasets import load_calibration_dataset, load_dataset
 from typed_evals.data.models import (
     CalibrationExample,
@@ -77,12 +83,14 @@ __all__ = [
     "PolicyCompliance",
     "RuntimeGuard",
     "SampleResult",
+    "SystemOneBackend",
     "TaskCompletion",
     "ToolAccuracy",
     "ToolCall",
     "ToolGrounding",
     "ToolProposal",
     "ToolSafety",
+    "VennAbersCalibrator",
     "aevaluate",
     "evaluate",
     "evaluated_by",

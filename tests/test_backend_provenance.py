@@ -43,7 +43,9 @@ class ProvenanceBackend(FakeBackend):
 
 
 def config():
-    return CalibrationConfig(enabled=True, min_samples=20, min_validation_samples=10)
+    return CalibrationConfig(
+        enabled=True, algorithm="isotonic", min_samples=20, min_validation_samples=10
+    )
 
 
 def fitted(backend):
@@ -52,10 +54,21 @@ def fitted(backend):
     return pipeline
 
 
-def legacy_artifact(bundle, path):
+def legacy_artifact_data(bundle, *, version=1):
     data = bundle.model_dump(mode="json")
-    data["schema_version"] = 1
-    del data["backend_provenance"]
+    data["schema_version"] = version
+    if version == 1:
+        del data["backend_provenance"]
+    for curve in data["curves"].values():
+        del curve["algorithm"]
+    for metric in data["report"]["metrics"].values():
+        del metric["algorithm"]
+        del metric["log_loss_improved"]
+    return data
+
+
+def legacy_artifact(bundle, path, *, version=1):
+    data = legacy_artifact_data(bundle, version=version)
     path.write_text(json.dumps(data), encoding="utf-8")
 
 
@@ -63,7 +76,7 @@ def test_new_custom_fit_explicitly_records_unknown_identity_and_remains_usable(
     scoring_backend, tmp_path
 ):
     pipeline = fitted(scoring_backend)
-    assert pipeline.calibration_bundle.schema_version == 2
+    assert pipeline.calibration_bundle.schema_version == 3
     assert pipeline.calibration_bundle.backend_provenance == {"status": "unknown"}
     path = tmp_path / "custom.json"
     pipeline.save_calibration(path)
@@ -133,7 +146,7 @@ def test_v2_unknown_and_verified_identities_cannot_be_interchanged(
     destination = scoring_backend if source_known else ProvenanceBackend()
     pipeline = fitted(source)
     path = tmp_path / "identity.json"
-    pipeline.save_calibration(path)
+    legacy_artifact(pipeline.calibration_bundle, path, version=2)
     with pytest.raises(CalibrationMismatchError, match="refit"):
         EvaluationPipeline(backend=destination, calibration=config()).load_calibration(path)
 
@@ -166,10 +179,12 @@ def test_v1_cannot_be_assumed_verified_for_decisions(scoring_backend, tmp_path):
 
 @pytest.mark.parametrize("version", [1, 2])
 def test_artifact_schema_cannot_silently_add_or_drop_provenance(version, tmp_path):
-    data = fitted(ProvenanceBackend()).calibration_bundle.model_dump(mode="json")
-    data["schema_version"] = version
+    bundle = fitted(ProvenanceBackend()).calibration_bundle
+    data = legacy_artifact_data(bundle, version=version)
     if version == 2:
         del data["backend_provenance"]
+    else:
+        data["backend_provenance"] = bundle.backend_provenance
     path = tmp_path / "invalid.json"
     path.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(CalibrationError, match="artifact"):

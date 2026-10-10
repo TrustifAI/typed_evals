@@ -1,7 +1,7 @@
 """Evaluate a response with Microsoft's Decision-1 model on OpenRouter.
 
 Install python-dotenv and set OPENROUTER_API_KEY in your environment or .env.
-Run from a checkout: python examples/openrouter_decision1.py
+Run from a checkout: python examples/openrouter_decisions.py
 Makes one live System One API request through JevBackend.
 """
 

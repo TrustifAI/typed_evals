@@ -85,8 +85,10 @@ def test_response_annotation_preserves_native_output_and_metadata(sample, score,
     assert result.output is native
     assert native["metadata"] == {"caller": "preserved"}
     assert result.decisions[0].action == action
-    assert result.metadata["jev"]["hallucination_suspected"] is suspected
-    event = result.metadata["jev"]["decisions"][0]
+    metadata = result.metadata
+    assert metadata["typed_evals"] == metadata["jev"]
+    assert metadata["typed_evals"]["hallucination_suspected"] is suspected
+    event = metadata["typed_evals"]["decisions"][0]
     assert event["evaluation"]["metrics"]["faithfulness"]["score"] == score
     assert event["evaluation"]["sample_hash"] == sample.content_hash
     assert json.loads(json.dumps(result.metadata)) == result.metadata
@@ -437,22 +439,27 @@ async def test_sync_entrypoint_works_in_notebook_loop(sample):
     assert (await guard.acheck("step", sample)).allowed
 
 
-def test_calibrated_pipeline_scores_drive_runtime_policy(scoring_backend):
+@pytest.mark.parametrize("algorithm,expected_probability", [("isotonic", 0.6), ("auto", 13 / 22)])
+def test_calibrated_pipeline_scores_drive_runtime_policy(
+    scoring_backend, algorithm, expected_probability
+):
     pipeline = EvaluationPipeline(
         [AnswerRelevancy(threshold=0.7)],
         backend=scoring_backend,
-        calibration=CalibrationConfig(enabled=True, min_samples=20, min_validation_samples=10),
+        calibration=CalibrationConfig(
+            enabled=True, algorithm=algorithm, min_samples=20, min_validation_samples=10
+        ),
     )
     pipeline.fit(calibrated_rows(), validation_data=calibrated_rows("validation"))
     guard = RuntimeGuard({"step": GuardPolicy(pipeline)})
     decision = guard.check("step", EvaluationSample(input="independent", response="0.8"))
     metric = decision.evaluation.metrics["answer_relevancy"]
     assert metric.raw_score == 0.8
-    assert metric.calibrated_probability == pytest.approx(0.6)
+    assert metric.calibrated_probability == pytest.approx(expected_probability)
     assert decision.action == "block"
     assert decision.to_dict()["evaluation"]["metrics"]["answer_relevancy"][
         "score"
-    ] == pytest.approx(0.6)
+    ] == pytest.approx(expected_probability)
 
 
 def test_calibration_configuration_error_is_fatal_even_when_errors_annotated(sample):

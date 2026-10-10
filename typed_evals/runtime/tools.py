@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from functools import wraps
@@ -122,7 +123,9 @@ def _decorate_tool(
             id=facts.get("id") or uuid4().hex,
             proposed_tool_call=proposal.model_copy(deep=True),
         )
-        execution = inspect.BoundArguments(signature, {**proposal.arguments, **runtime})
+        execution = inspect.BoundArguments(
+            signature, OrderedDict({**proposal.arguments, **runtime})
+        )
         return sample, execution
 
     if _async_callable(function):

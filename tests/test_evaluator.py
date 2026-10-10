@@ -1,5 +1,6 @@
 import asyncio
 import json
+import warnings
 
 import pytest
 from conftest import FakeBackend
@@ -11,6 +12,7 @@ from typed_evals import (
     EvaluationSample,
     Evaluator,
     Faithfulness,
+    Metric,
     ToolAccuracy,
     ToolProposal,
 )
@@ -175,6 +177,77 @@ async def test_sync_api_works_in_running_loop(sample, backend, evaluator_type):
 def test_empty_batch_does_not_open_api_session(backend):
     report = Evaluator(backend=backend).evaluate([])
     assert report.results == ()
+    assert backend.sessions == 0
+
+
+@pytest.mark.parametrize("evaluator_type", [Evaluator, EvaluationPipeline])
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_unused_contexts_warn_once_per_batch(evaluator_type, asynchronous, backend):
+    samples = [
+        EvaluationSample(input="Q", response="A", contexts=("private context",)),
+        EvaluationSample(input="Q2", response="A2"),
+        EvaluationSample(input="Q3", response="A3", contexts=("other context",)),
+    ]
+    evaluator = evaluator_type([AnswerRelevancy()], backend=backend)
+    with pytest.warns(UserWarning, match="contexts were supplied for 2 sample") as caught:
+        report = await evaluator.aevaluate(samples) if asynchronous else evaluator.evaluate(samples)
+    assert len(caught) == 1
+    assert "preset='rag'" in str(caught[0].message)
+    assert "private context" not in str(caught[0].message)
+    assert len(report.results) == len(samples)
+    assert all("contexts" not in state for state, _ in backend.calls)
+
+
+@pytest.mark.parametrize("selection", ["default", "rag", "custom"])
+def test_used_or_absent_contexts_do_not_warn(selection, sample, backend):
+    if selection == "default":
+        samples = [sample.model_copy(update={"contexts": ()})]
+        evaluator = Evaluator(backend=backend)
+    elif selection == "rag":
+        samples = [sample]
+        evaluator = Evaluator(preset="rag", backend=backend)
+    else:
+        samples = [sample]
+        metric = Metric(
+            name="custom_context_check",
+            instructions="Is the answer grounded in contexts?",
+            required_fields=("input", "response", "contexts"),
+            pass_definition="The answer is grounded in contexts",
+        )
+        evaluator = Evaluator([metric], backend=backend)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        evaluator.evaluate(samples)
+    if selection != "default":
+        assert backend.calls[0][0]["contexts"] == list(sample.contexts)
+
+
+@pytest.mark.parametrize("include_relevancy", [False, True])
+def test_skipped_context_metric_does_not_consume_evidence(include_relevancy, sample, backend):
+    context_metric = Metric(
+        name="reference_grounding",
+        instructions="Is the answer grounded in contexts and consistent with the reference?",
+        required_fields=("input", "response", "contexts", "reference"),
+        pass_definition="The answer meets both checks",
+    )
+    metrics = [context_metric, AnswerRelevancy()] if include_relevancy else [context_metric]
+    without_reference = sample.model_copy(update={"reference": None})
+    evaluator = Evaluator(metrics, backend=backend, missing="skip")
+    with pytest.warns(UserWarning, match="contexts were supplied for 1 sample") as caught:
+        report = evaluator.evaluate([sample, without_reference])
+    assert len(caught) == 1
+    assert report.results[1].metrics[context_metric.name].status == "skipped"
+    assert backend.calls[0][0]["contexts"] == list(sample.contexts)
+    assert len(backend.calls) == (2 if include_relevancy else 1)
+    if include_relevancy:
+        assert "contexts" not in backend.calls[1][0]
+
+
+def test_unused_context_warning_is_emitted_before_opening_a_session(sample, backend):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        with pytest.raises(UserWarning, match="contexts were supplied"):
+            Evaluator(backend=backend).evaluate([sample])
     assert backend.sessions == 0
 
 

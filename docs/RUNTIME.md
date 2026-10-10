@@ -6,24 +6,37 @@ maps to a `GuardPolicy`, which accepts either an `Evaluator` or a fitted
 thresholds, backend configuration, and optional calibration as offline evaluation.
 There are no agent-framework dependencies and no implicit global hooks.
 
+## When to use this
+
+| Use runtime guards to… | Keep in application code… |
+| --- | --- |
+| Judge a proposed tool call before a configured dispatcher executes it | Exact permissions, argument validation, budgets, and idempotency |
+| Withhold or annotate a materialized response against supplied evidence | Independent truth verification or guaranteed prompt-injection prevention |
+| Record decisions at explicit agent and tool boundaries | Hooks for hidden tools or execution paths the wrapper never sees |
+| Let the host retry or escalate a failed judgment | Reversing side effects from an action that already ran |
+
+Judgments add latency and can be wrong. Use representative labeled data to choose
+rubrics and thresholds. The default failure and unavailable-judgment policy blocks
+execution; selecting annotation permits it.
+
+| Your integration | Start here |
+| --- | --- |
+| A single Python function | [Guard a Python tool](#guard-a-python-tool) |
+| Registered framework tools | [LangChain](#langchain-tools) · [Other adapters](ADAPTERS.md) |
+| A dispatcher with custom metrics or calibration | [Guard tool dispatch](#guard-tool-dispatch-before-execution) |
+| A final response or agent entrypoint | [Responses](#annotate-or-withhold-responses) · [Agent decorators](#decorate-agents-directly) |
+| Policy actions, errors, and cancellation | [Failure semantics](#policy-and-failure-semantics) |
+
+For import/reload troubleshooting, see the [FAQ](FAQ.md#notebook-imports-after-updating-package-code).
+Migration notes are in the [changelog](../CHANGELOG.md#migration-notes).
+
+## Backend selection and metadata
+
 Jev remains the default. For native Decisions, install `typed-evals[openai]`, set
 `OPENAI_API_KEY`, and pass `backend=OpenAIDecisionsBackend()` to `guard_tool`, an
 `Evaluator`, or an `EvaluationPipeline`. The same backend is accepted by framework
-adapters when their dependency versions permit it. For example:
-
-```python
-from typed_evals import OpenAIDecisionsBackend, guard_tool
-
-
-@guard_tool(
-    policy="Only read tickets owned by Alice.",
-    input="Read my ticket T-42.",
-    contexts=["Authenticated customer: Alice. Alice owns T-42."],
-    backend=OpenAIDecisionsBackend(),
-)
-def read_ticket(ticket_id: str) -> str:
-    return ticket_store.read_authorized("Alice", ticket_id)
-```
+adapters when their dependency versions permit it. See [backend configuration](EVALUATION.md#choose-a-backend)
+for hosted TypeSafe-compatible models and client ownership.
 
 Decisions refusals and malformed/unavailable judgments follow `on_error`; the
 default `"block"` prevents tool execution. Recording evaluation errors preserves
@@ -39,14 +52,9 @@ transport failure after retries. Their messages omit provider response/refusal
 contents; the transport wrapper suppresses the SDK exception chain. Both follow
 the existing unavailable-judgment policy at runtime.
 
-Runtime wrappers retain the public `metadata["jev"]` key for backward
-compatibility, including when the selected backend is Decisions or custom. This
-is a legacy container name; inspect the evaluation's actual model and metric data
-instead of inferring provider identity from that key.
-
-For one tool, start with [Guard a Python tool](#guard-a-python-tool) or the
-[LangChain adapter](#langchain-tools). For custom metric panels, calibrated scores,
-or several checkpoints, use the explicit APIs further below.
+Runtime audit data is available under `metadata["typed_evals"]` for every backend.
+The legacy `metadata["jev"]` key aliases the same payload for backward compatibility.
+Inspect the evaluation's actual model and metric data to identify the judgment.
 
 ## Guard a Python tool
 
@@ -72,6 +80,9 @@ function with your framework. `input` and `contexts` can also be synchronous
 callbacks receiving a mapping of the tool's bound arguments, including defaults.
 These callbacks should use the application's authenticated request context to
 provide current facts; model-supplied claims of authorization are not evidence.
+Keep deterministic authorization in `ticket_store.read_authorized` and recheck
+current permissions when the call executes. Tool descriptions, retrieved passages,
+and user claims cannot grant access.
 
 The helper builds a `ToolSafety(policy=..., threshold=0.9)` evaluator and a
 `before_tool` checkpoint. It captures the function name, signature/docstring,
@@ -94,7 +105,7 @@ standalone decision objects, use `RuntimeGuard.call_tool`.
 
 ## LangChain tools
 
-Install `pip install '.[langchain]'`. Apply this adapter **under** `@tool`:
+Install `python -m pip install 'typed-evals[langchain]'`. Apply this adapter **under** `@tool`:
 
 ```python
 from langchain.tools import ToolRuntime, tool
@@ -106,21 +117,42 @@ from typed_evals.adapters.langchain import guard_tool
     policy="Only read tickets owned by the authenticated customer.",
     contexts=lambda runtime: runtime.context["authorization_evidence"],
 )
-def read_ticket(ticket_id: str, runtime: ToolRuntime) -> str:
+def read_ticket(ticket_id: str, runtime: ToolRuntime[dict]) -> str:
     """Read the complete text of a support ticket."""
     return ticket_store.read_authorized(runtime.context["customer_id"], ticket_id)
 ```
 
-The `runtime: ToolRuntime` parameter uses LangChain's
+The `runtime: ToolRuntime[dict]` parameter uses LangChain's
 [runtime injection](https://reference.langchain.com/python/langgraph.prebuilt/tool_node/ToolRuntime).
 The adapter preserves the annotation so LangChain excludes it from the model's
 tool schema. The judge receives the latest human message's text, the tool's public
 arguments and description, and your explicitly supplied evidence. It does not
 automatically receive runtime state, configuration, or credentials.
 
-`contexts` accepts fixed strings or a synchronous callback of `ToolRuntime`.
-Pass current application-owned facts using LangChain's runtime context when
-invoking the agent. The supplied tool call ID becomes the result's `sample_id`;
+`contexts` accepts a nonempty sequence of evidence strings or a synchronous
+callback of `ToolRuntime` returning that sequence. Register the decorated tool
+and pass current application-owned facts through the agent's runtime context:
+
+```python
+from langchain.agents import create_agent
+
+agent = create_agent(model=model, tools=[read_ticket], context_schema=dict)
+result = agent.invoke(
+    {"messages": [{"role": "user", "content": request}]},
+    context={
+        "customer_id": authenticated_customer_id,
+        "authorization_evidence": authorization_evidence,
+    },
+)
+```
+
+`model`, `request`, `authenticated_customer_id`, `authorization_evidence`, and
+`ticket_store` are supplied by your application. Generate the authorization
+evidence from its permission records, and enforce those permissions inside
+`ticket_store.read_authorized`. For async agents, use `await agent.ainvoke(...)`
+with the same context.
+
+The supplied tool call ID becomes the result's `sample_id`;
 if absent, a unique ID is generated. For `@tool("custom_name")`, also set
 `guard_tool(name="custom_name", ...)` to record the registered name accurately.
 
@@ -129,7 +161,13 @@ multimodal human requests raise instead of substituting an older request or
 silently discarding evidence. Other state/message formats, additional injected
 arguments, or custom evaluation panels can use `guarded_by` with an explicit mapper.
 The latest request is intentionally the input; add any relevant prior facts to
-your evidence. See [the complete runnable example](../examples/langchain_guarded_tools.py).
+your evidence.
+
+A blocked direct tool invocation raises `GuardrailViolation` before the function
+runs. A framework's tool-error handler may catch it and continue the agent run;
+the blocked attempt still does not execute. Register only the decorated callable
+so the dispatcher uses this guard. See the
+[runnable mock-data example](../examples/langchain_guarded_tools.py).
 
 ### CrewAI and Microsoft Agent Framework tools
 
@@ -162,24 +200,7 @@ python examples/runtime_guardrails.py --live
 ```
 
 The offline example uses synthetic fixture scores to demonstrate execution
-control. It does not measure Jev's classification accuracy.
-
-### Notebook imports after updating package code
-
-If a nonempty list of `ToolSafety(...)` / `ToolAccuracy(...)` raises
-`ValueError: metrics must contain at least one Metric`, restart the notebook kernel
-and rerun the imports and guard construction. Older evaluator versions use a class
-identity check that can fail after partial module reloads or loading the package
-under multiple import names. Use the root-level package consistently:
-
-```python
-from typed_evals import Evaluator, GuardPolicy, RuntimeGuard, ToolAccuracy, ToolSafety
-```
-
-The current evaluator revalidates base metric instances from another reload or
-import alias of the same source file. Invalid entries now identify their list
-index and type. Restarting is still needed to load updated code already cached in
-a running kernel, and to refresh custom metric subclasses after reloading modules.
+control. It does not measure a judge's classification accuracy.
 
 ## Guard tool dispatch before execution
 
@@ -229,7 +250,7 @@ try:
     result = guard.call_tool({"read_ticket": read_ticket}, sample)
     tool_output = result.output
     audit_metadata = result.metadata
-    tool_name = audit_metadata["jev"]["decisions"][0]["evaluation"]["tool_name"]
+    tool_name = audit_metadata["typed_evals"]["decisions"][0]["evaluation"]["tool_name"]
 except GuardrailViolation as exc:
     decision = exc.decision.to_dict()
     # No tool was dispatched. Return a refusal, request revised arguments,
@@ -294,7 +315,7 @@ response = response_guard.respond(
     native,
 )
 print(response.output)  # The exact native object.
-print(response.metadata["jev"]["hallucination_suspected"])
+print(response.metadata["typed_evals"]["hallucination_suspected"])
 ```
 
 `hallucination_suspected` is `True` when the judge fails `faithfulness` or
@@ -478,6 +499,9 @@ arguments exclude the bound `self` or `cls`.
 
 You can attach the decorator at agent construction time:
 
+<details>
+<summary>Example: guard an agent factory</summary>
+
 ```python
 @guarded_agent(
     response_guard,
@@ -494,6 +518,8 @@ You can attach the decorator at agent construction time:
 def create_agent():
     return YourFrameworkAgent(client=client, tools=registered_tools)
 ```
+
+</details>
 
 Use `factory=True` for functions returning agents, including async factories.
 For class constructors it is automatic: `@guarded_agent(...)` above `class Agent`
@@ -516,6 +542,9 @@ custom streaming APIs still require explicit buffering in your adapter.
 ### Guard registered tools without changing their return types
 
 Decorate tools **before registering them** with the framework:
+
+<details>
+<summary>Example: keep the tool's native return type</summary>
 
 ```python
 from typed_evals import guarded_by, ToolProposal
@@ -546,6 +575,8 @@ def read_ticket(ticket_id: str) -> dict:
 native_agent = YourFrameworkAgent(client=client, tools=[read_ticket])
 agent = protect(native_agent)
 ```
+
+</details>
 
 The decorated tool preserves its name, annotations, signature, and native return
 value for framework schema generation and dispatch. Place any framework-specific

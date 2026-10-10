@@ -5,13 +5,29 @@ All adapters evaluate a proposed tool call before running the function, using
 value and use the shared runtime guard for blocking, timeouts, judge errors, and
 argument snapshots. Sync and async functions are supported.
 
-Install only the framework you use, from the repository root:
+Register the decorated tool with your framework. Supply application-owned
+authorization facts, and keep deterministic permission checks inside the tool;
+model-generated arguments, retrieved content, and tool descriptions cannot grant
+access. An agent entrypoint wrapper does not intercept undecorated tools.
+
+Install only the framework you use:
 
 ```bash
-pip install '.[langchain]'
-pip install '.[crewai]'
-pip install '.[agent-framework]'
+python -m pip install 'typed-evals[langchain]'
+python -m pip install 'typed-evals[crewai]'
+python -m pip install 'typed-evals[agent-framework]'
 ```
+
+From a checkout, replace `typed-evals` with `.` to install the local extra.
+
+The `openai` and `crewai` extras cannot currently be installed together:
+`typed-evals[openai,crewai]` (or `.[openai,crewai]` from a checkout) fails dependency
+resolution. The supported CrewAI dependency requires OpenAI SDK `<3`, while the
+native OpenAI Decisions backend requires `>=3.26.0,<4`. Install the two extras in
+separate environments; the CrewAI adapter can use the default Jev backend.
+The [plain Python helper](RUNTIME.md#guard-a-python-tool), LangChain adapter, and
+Microsoft adapter accept `backend=OpenAIDecisionsBackend()` when installed with
+the `openai` extra; see [backend setup](EVALUATION.md#choose-a-backend).
 
 The new integrations are tested against CrewAI 1.15.22 and
 `agent-framework-core` 1.19.0. CrewAI currently supports Python below 3.14;
@@ -22,7 +38,9 @@ the CI matrix covers Python 3.11–3.13. Framework dependencies remain optional.
 Apply `typed_evals.adapters.langchain.guard_tool` beneath `@langchain.tools.tool`.
 The function declares `runtime: ToolRuntime`. The adapter extracts the latest
 human request and call ID; a contexts callback receives that runtime object.
-See the [runtime guide](RUNTIME.md#langchain-tools) and
+The [runtime guide](RUNTIME.md#langchain-tools) shows decorator order, tool
+registration, passing authenticated identity and evidence through `context`, and
+handling blocked calls. See the
 [complete example](../examples/langchain_guarded_tools.py).
 
 ## CrewAI
@@ -33,7 +51,7 @@ This adapter creates a native CrewAI tool, so use it in place of CrewAI's `@tool
 from typed_evals.adapters.crewai import guard_tool
 
 
-def make_ticket_tool(request: str, authorization_evidence: list[str]):
+def make_ticket_tool(request: str, customer_id: str, authorization_evidence: list[str]):
     @guard_tool(
         policy="Only read tickets owned by the authenticated customer.",
         input=request,
@@ -42,13 +60,19 @@ def make_ticket_tool(request: str, authorization_evidence: list[str]):
     )
     def read_ticket(ticket_id: str) -> str:
         """Read an owned support ticket."""
-        return ticket_store.read_authorized(ticket_id)
+        return ticket_store.read_authorized(customer_id, ticket_id)
 
     return read_ticket
 ```
 
-Here `ticket_store` is your application's ticket service. Register the returned
-tool in `crewai.Agent(tools=[read_ticket], ...)` and use `crewai.Crew(cache=False, ...)`.
+Here `ticket_store` is your application's ticket service. Pass the authenticated
+customer ID when creating the tool, then register it:
+
+```python
+read_ticket = make_ticket_tool(request, authenticated_customer_id, authorization_evidence)
+# Use read_ticket in crewai.Agent(tools=[read_ticket], ...) with Crew(cache=False, ...).
+```
+
 Create request-specific tools to capture per-run evidence.
 `input` and `contexts` may also be synchronous callbacks of bound arguments,
 including default values. Authorization facts must come from the application.
@@ -62,7 +86,6 @@ a shared cache from bypassing the guard. No process-wide hooks are installed.
 Direct invocation raises `GuardrailViolation` if judging fails or the policy
 blocks the call. CrewAI's agent loop can report this as a tool error and continue
 or retry; the protected function still does not run on the blocked attempt.
-Application authorization remains part of the underlying tool.
 
 Run the [offline CrewAI example](../examples/crewai_guarded_tools.py) without
 API credentials. CrewAI's [custom-tool documentation](https://docs.crewai.com/en/learn/create-custom-tools)

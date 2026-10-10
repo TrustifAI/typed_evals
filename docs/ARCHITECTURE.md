@@ -1,7 +1,15 @@
 # Architecture and extension contract
 
-The public entry point is `EvaluationPipeline`. It composes an `Evaluator`, a
-backend adapter, metric definitions, and an optional `CalibrationBundle`.
+The convenience entry points are `evaluate` and `aevaluate`. `Evaluator` owns a
+metric panel and backend; `EvaluationPipeline` adds optional calibration using a
+`CalibrationBundle`.
+
+Three adapters are bundled: `JevBackend` (default), `OpenAIDecisionsBackend`
+(optional `openai` extra), and `SystemOneBackend` for deployed Jev-compatible
+servers, including Clef, Laya, and Strands Decider. `JevBackend` also supports
+TypeSafe-compatible hosted endpoints, such as Microsoft Decision-1 on OpenRouter.
+Custom adapters implement the same backend protocol. Evaluation and runtime guards
+remain provider independent.
 
 ```mermaid
 flowchart TD
@@ -31,10 +39,11 @@ flowchart TD
 | `metrics/registry.py`, `metrics/presets.py` | CLI metric registry and fixed evaluation panels |
 | `backends/jev.py` | Official SDK adapter and backend/session protocols |
 | `backends/openai_decisions.py` | Native Decisions compilation, strict answer validation, and flat usage conversion |
+| `backends/systemone.py` | HTTP adapter for deployed System One servers, optional authentication, retries, and flat usage conversion |
 | `evaluation/evaluator.py` | Preflight, fixed worker pool, per-sample batching, error policy, aggregation |
 | `evaluation/pipeline.py` | Opt-in lifecycle, independent split, fitting, save/load, automated run |
 | `evaluation/decorators.py` | Sync/async decorators preserving native outputs |
-| `calibration/core.py` | Isotonic fitting, portable prediction, diagnostics, validated artifacts |
+| `calibration/core.py` | Venn–Abers/isotonic fitting, portable prediction, diagnostics, validated artifacts |
 | `runtime/guards.py` | Named execution checkpoints, decision policies, tool dispatch gates, response metadata |
 | `runtime/agents.py` | Framework-independent agent decorators, entrypoint discovery, and instance proxies |
 | `runtime/tools.py` | Shared tool-argument snapshots, evidence mapping, and guarded execution |
@@ -45,10 +54,7 @@ These paths are relative to `typed_evals/`. Each subpackage exposes its public
 objects through `__init__.py`; the root package continues to export the existing
 public API. For example, `typed_evals.metrics.Metric` and
 `typed_evals.evaluation.Evaluator` are available alongside their root imports.
-Direct implementation imports moved with the files: use
-`typed_evals.data.models` instead of `typed_evals.models`,
-`typed_evals.backends` instead of `typed_evals.backend`, and
-`typed_evals.evaluation.evaluator` instead of `typed_evals.evaluator`.
+See the [changelog](../CHANGELOG.md) for direct implementation import migrations.
 
 Importing the core package or an adapter module does not import an agent framework.
 It does not import OpenAI either; the optional SDK loads when Decisions is used.
@@ -67,7 +73,10 @@ async def judge(state: dict, questions: Mapping[str, Question]) -> JudgeResponse
 
 `Question` is a TypeSafe SDK Noul, Choice, or Score object. `JudgeResponse`
 contains the actual model ID, typed-answer dictionaries, and optional usage.
-The fake backend in `examples/offline_demo.py` demonstrates the contract.
+The core `typesafe-sdk` dependency is required for metric construction even when
+the chosen backend uses another provider. Pass a custom backend as `backend=` to
+evaluation entry points or runtime guards. The fake backend in
+[`examples/offline_demo.py`](../examples/offline_demo.py) demonstrates the contract.
 
 TypeSafe-compatible hosted models use `JevBackend` directly with `model`,
 `base_url`, and `api_key`. For Microsoft Decision-1 on OpenRouter, set
@@ -76,7 +85,16 @@ TypeSafe-compatible hosted models use `JevBackend` directly with `model`,
 SDK appends `/v1/systemone` and handles the existing typed question/answer
 protocol, so this configuration needs no custom adapter. See the
 [hosted-model guide](EVALUATION.md#hosted-typesafe-compatible-models) and
-[OpenRouter example](../examples/openrouter_decision1.py).
+[OpenRouter example](../examples/openrouter_decisions.py).
+
+`SystemOneBackend(model=..., base_url=..., api_key=None)` sends the same typed
+question schemas to `/v1/systemone` through an async HTTP client. The required
+`base_url` is an API root; path prefixes are preserved before `/v1/systemone` is
+appended. Credentials are explicit, so a keyless server needs no TypeSafe API key
+or environment configuration. The adapter retains the server's model and typed
+answers, and ignores non-counter usage metadata. See the
+[open-model guide](EVALUATION.md#open-and-self-hosted-system-one-models) and
+[runnable example](../examples/systemone_decisions.py).
 
 Image support is an optional backend capability:
 
@@ -85,9 +103,9 @@ supported_modalities = frozenset({"text", "image"})
 ```
 
 Backends without `supported_modalities` are treated as text-capable, preserving the
-existing protocol. Decisions advertises text and image support; Jev currently
-advertises text only. The evaluator checks selected modalities before opening a
-session. An optional `validate_state(state)` hook lets a backend preflight its
+existing protocol. Decisions advertises text and image support; Jev and System One
+currently advertise text only. The evaluator checks selected modalities before
+opening a session. An optional `validate_state(state)` hook lets a backend preflight its
 provider-specific limits across the whole batch before any requests. Unselected
 images do not affect text requests or require an image-capable backend.
 
@@ -104,6 +122,9 @@ the same. Built-in metrics and presets retain their existing required fields.
 transports, endpoints, or caller-owned SDK configuration. The caller closes that
 client. Its timeout and retry settings supersede the backend's `timeout` /
 `max_retries`; each adapter still passes its explicit `model` on every request.
+`SystemOneBackend(client=existing_async_http_client, model=..., base_url=...)`
+also leaves its injected client open; its adapter owns request retries and uses
+the supplied client's timeout configuration.
 Use a supplied async client inside its owning event loop. Jev remains the default;
 Decisions defaults to `gpt-6-luna` and requires `typed-evals[openai]`.
 
@@ -152,13 +173,13 @@ accepts inline PNG, JPEG, WebP, and GIF data URLs; Decisions validates its limit
 
 Calibration provenance is an optional backend capability, separate from the
 `Backend` protocol. Bundled adapters identify their provider, backend, compiler
-version, and ordered static question configuration; Decisions also records the
+version, and ordered static question configuration; Decisions and System One also record the
 effective endpoint (without URL userinfo, query, or fragment). The pipeline
 fingerprints that configuration without sample evidence, thresholds, credentials,
 or transport settings. Caller-owned clients with additional custom routing
 behavior must keep that behavior stable for a fitted curve. A third-party backend
 implementing only `model` and `session()` remains
-usable and produces an explicit unknown-provenance v2 artifact. See
+usable and produces an explicit unknown-provenance v3 artifact. See
 [version compatibility](CALIBRATION.md#artifact-versions-and-compatibility).
 
 Selecting images uses multimodal compiler provenance and metric fingerprint
@@ -170,14 +191,19 @@ and labels, while provenance and saved reports contain no raw image bytes.
 
 - All sample input checks occur before the first request in an evaluation batch.
 - A missing required evidence field raises by default. Explicit skips have no score.
-- The official SDK owns retries for transient errors; permanent bad requests and
-  authentication errors are not retried by the framework.
+- Supplied contexts excluded by all active metrics produce one warning per batch,
+  after input validation and before the backend session opens.
+- Jev and Decisions use their SDK retries; System One retries transient HTTP and
+  transport failures. Permanent bad requests and authentication errors are not retried.
 - API failures raise by default. `errors="record"` records the exception type
   without copying provider response bodies into exported reports.
 - Decisions SDK transport failures become `OpenAIDecisionsError` after SDK
   retries, with a safe type-only message and suppressed provider exception chain.
   A per-question refusal uses `DecisionRefusalError`, a subclass of
   `InvalidAnswerError`; refusal contents are withheld.
+- System One transport failures become `SystemOneError` with only the HTTP
+  status or transport exception type. Invalid or missing answers are unavailable
+  per metric; unknown answer names and duplicate JSON fields fail the request.
 - Jev partial response omissions are validated metric by metric. Decisions
   missing, duplicate, or unexpected question names fail the entire request;
   attributable malformed answers and refusals are handled per metric. Unavailable
@@ -211,5 +237,7 @@ operation/tool once after its checkpoint permits it, and gate materialized outpu
 before delivery. It never automatically retries application actions. Proposals
 are separate from observed tool events. See the [runtime contract](RUNTIME.md)
 for policy, failure, concurrency, and framework-adapter semantics.
+Runtime audit data uses `metadata["typed_evals"]`; the legacy `metadata["jev"]`
+alias remains available with the same payload for existing consumers.
 It does not claim numeric equality with existing
 Ragas/DeepEval metrics. Integrate native outputs through explicit sample mappings.

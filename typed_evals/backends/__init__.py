@@ -8,6 +8,7 @@ from .jev import (
     Question,
 )
 from .openai_decisions import OpenAIDecisionsBackend
+from .systemone import SystemOneBackend
 
 __all__ = [
     "Backend",
@@ -16,4 +17,5 @@ __all__ = [
     "JudgeSession",
     "OpenAIDecisionsBackend",
     "Question",
+    "SystemOneBackend",
 ]

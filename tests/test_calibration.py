@@ -23,7 +23,9 @@ from typed_evals.errors import CalibrationError, CalibrationMismatchError, DataL
 
 
 def config(**kwargs):
-    return CalibrationConfig(enabled=True, min_samples=20, min_validation_samples=10, **kwargs)
+    return CalibrationConfig(
+        enabled=True, algorithm="isotonic", min_samples=20, min_validation_samples=10, **kwargs
+    )
 
 
 def fitted_pipeline(backend):

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import time
+import warnings
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, TypedDict, Unpack, overload
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, Unpack, cast, overload
 
 from pydantic import JsonValue
 
@@ -33,7 +34,10 @@ if TYPE_CHECKING:
 
 
 class Evaluator:
-    """Evaluate precomputed responses; this class never invokes the application under test."""
+    """Evaluate precomputed responses; this class never invokes the application under test.
+
+    Supplied contexts unused by active metrics produce one warning per batch.
+    """
 
     def __init__(
         self,
@@ -107,8 +111,11 @@ class Evaluator:
             if not allow_calibration_overlap:
                 calibration.check_overlap(samples)
         prepared: list[tuple[dict[str, Any], dict[str, Question], dict[str, MetricResult]]] = []
+        unused_contexts = 0
         for sample in samples:
-            active, skipped, fields = {}, {}, set()
+            active: dict[str, Question] = {}
+            skipped: dict[str, MetricResult] = {}
+            fields: set[str] = set()
             for metric in self.metrics:
                 absent = metric.missing_fields(sample)
                 if absent:
@@ -127,7 +134,19 @@ class Evaluator:
             state = sample.state(fields)
             if active:
                 validate_evidence(self.backend, state)
+            if sample.contexts and "contexts" not in fields:
+                unused_contexts += 1
             prepared.append((state, active, skipped))
+        if unused_contexts:
+            warnings.warn(
+                f"contexts were supplied for {unused_contexts} sample(s) but are unused because "
+                "no active metric requires 'contexts'. Select preset='rag' or a metric that "
+                "requires 'contexts'; skipped metrics do not consume evidence.",
+                UserWarning,
+                # The async entry point may be run by asyncio or a notebook worker thread;
+                # keep the source here instead of attributing the warning to loop internals.
+                stacklevel=1,
+            )
         results: list[SampleResult | None] = [None] * len(samples)
         pending = iter(range(len(samples)))
 
@@ -168,8 +187,12 @@ class Evaluator:
                 skipped=sum(value.status == "skipped" for value in values),
                 errors=sum(value.status == "error" for value in values),
                 passed=passed,
-                mean_raw_score=sum(value.raw_score for value in good) / len(good) if good else None,
-                mean_score=sum(value.score for value in good) / len(good) if good else None,
+                mean_raw_score=sum(cast(float, value.raw_score) for value in good) / len(good)
+                if good
+                else None,
+                mean_score=sum(cast(float, value.score) for value in good) / len(good)
+                if good
+                else None,
                 pass_rate=passed / len(good) if good else None,
             )
         return EvaluationReport(
@@ -180,16 +203,18 @@ class Evaluator:
         self,
         sample: EvaluationSample,
         index: int,
-        prepared: tuple,
+        prepared: tuple[dict[str, Any], dict[str, Question], dict[str, MetricResult]],
         session: JudgeSession | None,
         calibration: CalibrationBundle | None,
     ) -> SampleResult:
         started = time.perf_counter()
         state, questions, skipped = prepared
-        metrics, model, usage = dict(skipped), None, {}
+        metrics = dict(skipped)
+        model: str | None = None
+        usage: dict[str, int | None] = {}
         if questions:
             try:
-                response = await session.judge(state, questions)
+                response = await cast(JudgeSession, session).judge(state, questions)
             except Exception as exc:
                 if self.errors == "raise":
                     raise
@@ -348,18 +373,22 @@ def evaluate(
     One sample returns SampleResult; sequences and paths always return EvaluationReport.
     Without metrics or a preset, checks answer relevancy only. Calibration stays opt-in
     through EvaluationPipeline. Use aevaluate to keep a running event loop responsive.
+    Warns once per batch when supplied contexts are unused by active metrics.
     """
-    return run_sync(
-        lambda: aevaluate(
-            samples,
-            metrics,
-            preset=preset,
-            backend=backend,
-            max_concurrency=max_concurrency,
-            missing=missing,
-            errors=errors,
-            **sample_fields,
-        )
+    return cast(
+        SampleResult | EvaluationReport,
+        run_sync(
+            lambda: aevaluate(
+                samples,
+                metrics,
+                preset=preset,
+                backend=backend,
+                max_concurrency=max_concurrency,
+                missing=missing,
+                errors=errors,
+                **sample_fields,
+            )
+        ),
     )
 
 

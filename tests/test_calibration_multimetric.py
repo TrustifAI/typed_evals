@@ -46,7 +46,9 @@ def test_each_metric_gets_its_own_curve_and_unlabeled_rows_are_excluded():
     pipeline = EvaluationPipeline(
         [AnswerRelevancy(), second],
         backend=backend,
-        calibration=CalibrationConfig(enabled=True, min_samples=10, min_validation_samples=10),
+        calibration=CalibrationConfig(
+            enabled=True, algorithm="isotonic", min_samples=10, min_validation_samples=10
+        ),
     )
     report = pipeline.fit(rows("train"), validation_data=rows("val"))
     assert report.metrics["answer_relevancy"].training_samples == 40

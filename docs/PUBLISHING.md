@@ -28,17 +28,18 @@ the unused `PYPI_TOKEN` GitHub secret if no other workflow uses it.
 ## Release a version
 
 1. Update `version` in `pyproject.toml` and `__version__` in
-   `typed_evals/__init__.py` to the same new version.
+   `typed_evals/__init__.py` to the same new version. Move the relevant entries
+   from `Unreleased` in [CHANGELOG.md](../CHANGELOG.md) under that version.
 2. Commit and push the release changes, including both workflow files.
-3. Create and push a matching tag, for example `v0.1.0` for version `0.1.0`:
+3. Create and push a matching tag, for example `v0.2.1` for version `0.2.1`:
 
    ```sh
-   git tag -a v0.1.0 -m "Release 0.1.0"
-   git push origin v0.1.0
+   git tag -a v0.2.1 -m "Release 0.2.1"
+   git push origin v0.2.1
    ```
 
 The workflow checks the tag against the package version, runs the Python
-3.11–3.13 test matrix and lint checks, builds a wheel from the source distribution,
+3.11–3.13 test matrix, lint, formatting, and mypy checks, builds a wheel from the source distribution,
 checks package metadata, and smoke tests the installed wheel. Publishing waits for
 all checks to succeed and for any configured environment approval.
 
@@ -49,7 +50,7 @@ A manual run on a branch performs validation without publishing. A manual run
 targeting a matching version tag can publish, for example:
 
 ```sh
-gh workflow run publish.yml --ref v0.1.0
+gh workflow run publish.yml --ref v0.2.1
 ```
 
 GitHub Actions are pinned to verified release commits. Dependabot proposes weekly

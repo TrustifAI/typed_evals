@@ -5,6 +5,17 @@
 Calibration is **off by default**. When enabled, the pipeline must be fitted or
 loaded before evaluation; it never silently falls back to raw scores.
 
+The default `algorithm="auto"` chooses Venn–Abers for a metric with fewer than
+2,000 labeled training rows, and isotonic for 2,000 or more. Count only that
+metric's labels after the hold-out split; sparse labels can cause different
+metrics in one panel to use different algorithms. The cutoff is a configurable
+heuristic, not an established sample-size guarantee. Both algorithms can worsen
+held-out performance.
+
+Install `python -m pip install 'typed-evals[calibration]'` to support isotonic
+fitting. Venn–Abers fitting and prediction need no scikit-learn dependency. The
+pipeline checks required fitting dependencies before any judge requests.
+
 To try the example below, run it from the repository root with the supplied
 [`labeled.jsonl`](../examples/assets/labeled.jsonl) and
 [`test.jsonl`](../examples/assets/test.jsonl). These fictional
@@ -20,7 +31,8 @@ to exercise the pipeline, and replace them with representative, human-reviewed
 labels before interpreting calibration probabilities or quality improvements.
 The test file contains evaluation samples without labels and shares no scenario
 groups or sample content with the labeled file. Running this example uses the
-Jev API and requires `TYPESAFE_API_KEY` and the calibration dependencies above.
+Jev API and requires `TYPESAFE_API_KEY`. Its 128 training rows per metric select
+Venn–Abers under the default configuration.
 
 ```python
 from typed_evals import (
@@ -55,6 +67,23 @@ classes on each side. These are input safeguards, not a statistical guarantee.
 Use several hundred representative expert-labeled examples when possible, and
 inspect the held-out report. You can explicitly lower the minima for experiments.
 
+Choose an algorithm independently of those input minima:
+
+```python
+# Select by the number of labeled training rows for each metric.
+config = CalibrationConfig(enabled=True, algorithm="auto", isotonic_min_samples=2000)
+
+# Explicit choices ignore the automatic selection cutoff.
+small_data_config = CalibrationConfig(enabled=True, algorithm="venn_abers")
+isotonic_config = CalibrationConfig(enabled=True, algorithm="isotonic")
+```
+
+`algorithm` accepts `"auto"`, `"venn_abers"`, or `"isotonic"`.
+`isotonic_min_samples` must be an integer of at least 2; it changes only automatic
+algorithm selection, not `min_samples` or class-count validation. Explicit
+isotonic fitting remains available for small datasets, where its exact 0/1
+outputs can cause large log loss on later errors.
+
 For controlled or temporal splits, provide your own independent validation set:
 
 ```python
@@ -68,8 +97,10 @@ report = pipeline.evaluate(load_dataset("examples/assets/test.jsonl"))
 The deployed curve uses **only the training partition**. The pipeline does not
 refit on the hold-out after reporting performance. Reports include raw and
 calibrated Brier score, log loss, binary ECE, reliability bins, and accuracy at
-0.5. Improvement is measured, not assumed. A worse held-out Brier score is
-explicitly recorded; fitting does not automatically approve a model for deployment.
+0.5. Each metric report records its selected `algorithm`, `brier_improved`, and
+`log_loss_improved`. Notes flag held-out Brier score or log loss that did not
+improve. Improvement is measured, not assumed; fitting does not automatically
+approve a model for deployment.
 
 Reload without training again:
 
@@ -86,7 +117,38 @@ Changing metric wording, criteria, evidence fields, version, question panel/orde
 backend/compiler configuration, or the requested/observed model version invalidates
 the artifact. Changing an
 acceptance threshold does not. Save custom metric definitions in your own source
-alongside the artifact. JSON knots are validated and restored without pickle.
+alongside the artifact. JSON predictor data is validated and restored without
+pickle or scikit-learn inference dependencies. Loading an artifact uses its saved
+algorithm; the current configuration does not switch a previously fitted curve.
+
+## Use Venn–Abers directly
+
+The public calibrator accepts raw scores and binary labels from a separate
+calibration set:
+
+```python
+from typed_evals import VennAbersCalibrator
+
+curve = VennAbersCalibrator.fit(
+    scores=[0.1, 0.2, 0.4, 0.6, 0.8, 0.9],
+    labels=[0, 0, 1, 0, 1, 1],
+)
+p0, p1 = curve.predict_interval(0.7)
+probability = curve.predict(0.7)
+```
+
+This implements inductive Venn–Abers prediction. For the queried score, it
+computes the isotonic result after adding a hypothetical label 0 (`p0`), then
+after adding label 1 (`p1`), including tied-score pooling. `predict()` returns
+`p1 / (1 - p0 + p1)`, the point prediction that minimizes worst-case regret for
+log loss. It stays strictly between 0 and 1. The pair `(p0, p1)` is a
+multiprobability prediction, **not a confidence interval**; the combined point
+prediction does not inherit a perfect-calibration guarantee. See the original
+[Venn–Abers paper, section 4](https://auai.org/uai2014/proceedings/individuals/166.pdf).
+
+The calibrator precomputes its prediction lookup in `O(n log n)` time when
+fitted, then uses `O(log n)` lookup per score. Saved lookup data permits inference
+without retaining individual training rows or refitting isotonic models.
 
 ## Fit Decisions calibration separately
 
@@ -122,7 +184,8 @@ Or use the CLI, which selects `gpt-6-luna` when `--model` is omitted:
 
 ```bash
 typed_evals calibrate examples/assets/labeled.jsonl --backend openai-decisions \
-  --metrics faithfulness answer_relevancy --output openai-calibration.json
+  --metrics faithfulness answer_relevancy --algorithm auto \
+  --isotonic-min-samples 2000 --output openai-calibration.json
 typed_evals evaluate examples/assets/test.jsonl --backend openai-decisions \
   --metrics faithfulness answer_relevancy --calibration openai-calibration.json \
   --threshold 0.9 --output openai-report.json
@@ -134,9 +197,19 @@ refusal or unavailable judgment fails the fit; the previous successful in-memory
 bundle remains intact. Model identity and dataset/group overlap checks continue
 to apply.
 
+Use `--algorithm venn_abers` or `--algorithm isotonic` to force an algorithm on
+`calibrate`. `--isotonic-min-samples` changes the cutoff for `--algorithm auto`.
+These options select the fitting algorithm; `evaluate --calibration` uses the
+predictor stored in the artifact.
+
 ## Artifact versions and compatibility
 
-New fits save `schema_version: 2` with explicit `backend_provenance`. Bundled
+New fits save `schema_version: 3` with tagged Venn–Abers or isotonic curves and
+the selected algorithm in each metric's diagnostic report. V1 and v2 isotonic
+artifacts remain readable and retain their original interpolation and endpoint
+behavior; loading does not convert them to Venn–Abers.
+
+V2 and v3 artifacts include explicit `backend_provenance`. Bundled
 backends supply a verified configuration and its SHA-256 fingerprint: provider,
 backend identity, compiler version, score-affecting static configuration, and the
 ordered compiled questions. The fingerprint describes translation rules and
@@ -152,7 +225,7 @@ Third-party backends implementing only `model` and `session()` remain supported.
 Their new artifacts carry `status: "unknown"`, rather than fabricated provider
 metadata, and retain the existing model, metric, ordering, evidence, and overlap
 checks. Unknown provenance is compatible only with unknown provenance; it cannot
-be transferred to a verified bundled provider. For verified v2 artifacts, direct
+be transferred to a verified bundled provider. For verified v2/v3 artifacts, direct
 `CalibrationBundle.validate_for(...)` callers must also supply current backend
 provenance. Evaluators and pipelines supply it automatically.
 
@@ -195,6 +268,10 @@ reproduce a fit.
 
 ## The statistical target
 
+For result fields, acceptance thresholds, and the distinction between raw scores,
+provider confidence, and calibrated probabilities, see
+[what the numbers mean](EVALUATION.md#what-the-numbers-mean).
+
 For each metric m, annotate independent samples with y_m ∈ {0, 1}, where 1 means
 the sample satisfies the metric's documented pass definition. Let s_m be its raw
 judge signal. The fitted monotone mapping estimates:
@@ -213,19 +290,24 @@ event; it is not fitted against fractional ordinal labels.
 1. Validate metric label names, evidence, independent groups, and class/sample counts.
 2. Reserve a hold-out or accept an explicitly supplied independent validation set.
 3. Collect raw metric scores without any existing calibrator. Labels never enter state.
-4. Fit `sklearn.isotonic.IsotonicRegression(increasing=True, y_min=0, y_max=1,
-   out_of_bounds="clip")` per metric using only labeled training rows.
+4. Select each metric's algorithm from its labeled training count, or use the
+   configured explicit choice. Fit Venn–Abers or
+   `sklearn.isotonic.IsotonicRegression(increasing=True, y_min=0, y_max=1,
+   out_of_bounds="clip")` using only those training rows.
 5. Evaluate the fitted curves on labeled validation rows. Publish raw/calibrated
    Brier score, log loss, ECE, and reliability bins for each metric.
 6. Atomically replace the in-memory bundle after all metrics succeed. Save it
    explicitly to a versioned JSON artifact for reuse.
-7. For unseen samples, check metric, model, and backend provenance, then interpolate the
-   stored knots and apply each metric's configured threshold.
+7. For unseen samples, check metric, model, and backend provenance, use the saved
+   predictor, and apply each metric's configured threshold.
 
-The stored predictor matches scikit-learn's linear interpolation between learned
-knots, including clipping outside the observed fitting range. No refitting and
-no scikit-learn import occurs during inference. Constant raw scores yield a
-constant training base rate; they cannot gain discrimination through calibration.
+The isotonic predictor matches scikit-learn's linear interpolation between learned
+knots, including clipping outside the observed fitting range. The Venn–Abers
+predictor uses its stored lookup and combines the two hypothetical-label results.
+No refitting and no scikit-learn import occurs during inference. A constant raw
+signal cannot gain discrimination through calibration. With constant training
+scores, isotonic learns the training base rate; Venn–Abers smooths that rate at
+the observed score and can produce a wider pair outside the fitting range.
 
 ## Data separation
 
@@ -258,9 +340,12 @@ Do not label every sample automatically as “pass”; both classes are required
 
 ECE is bin-dependent and noisy on small samples; it is not a confidence interval.
 The artifact includes bin counts and observed rates so empty/tiny bins are visible.
-Isotonic fitting is monotone but can introduce ties, change threshold decisions,
-and sometimes worsen held-out performance. It cannot repair a fundamentally
-uninformative judge. Calibration on one domain is not a guarantee for another.
+Both calibrators are monotone but can introduce ties, change threshold decisions,
+and worsen held-out performance. Isotonic can output exactly 0 or 1, even with
+2,000 training rows; Venn–Abers point predictions avoid those endpoints but still
+can have worse Brier score or log loss than raw scores. Neither repairs a
+fundamentally uninformative judge. Calibration on one domain is not a guarantee
+for another.
 
 ## Operational contract
 
