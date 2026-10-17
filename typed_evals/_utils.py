@@ -9,9 +9,7 @@ from collections.abc import Callable, Coroutine
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from pathlib import Path
-from typing import Any, TypeVar
-
-T = TypeVar("T")
+from typing import Any
 
 
 def digest(value: Any) -> str:
@@ -19,7 +17,7 @@ def digest(value: Any) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def run_sync(factory: Callable[[], Coroutine[Any, Any, T]]) -> T:
+def run_sync[T](factory: Callable[[], Coroutine[Any, Any, T]]) -> T:
     """Run to completion, using a worker thread when the caller already has a loop."""
     try:
         asyncio.get_running_loop()

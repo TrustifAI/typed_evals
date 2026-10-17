@@ -6,11 +6,9 @@ import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import wraps
-from typing import Any, Generic, Protocol, TypeVar
+from typing import Any, Protocol
 
 from typed_evals.data.models import EvaluationReport, EvaluationSample, SampleResult
-
-T = TypeVar("T")
 
 
 class ResponseEvaluator(Protocol):
@@ -24,7 +22,7 @@ class ResponseEvaluator(Protocol):
 
 
 @dataclass(frozen=True)
-class EvaluatedResponse(Generic[T]):
+class EvaluatedResponse[T]:
     """Preserves the application's native output, alongside structured evaluation metadata."""
 
     output: T

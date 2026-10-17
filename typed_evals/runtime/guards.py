@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from functools import wraps
 from types import MappingProxyType
-from typing import Any, Generic, Literal, TypeVar, cast
+from typing import Any, Literal, TypeVar, cast
 from uuid import uuid4
 
 from pydantic import Field, JsonValue
@@ -152,7 +152,7 @@ class GuardrailViolation(TypedEvalsError):
 
 
 @dataclass(frozen=True)
-class GuardedResponse(Generic[T]):
+class GuardedResponse[T]:
     """Native output plus per-invocation decisions; no shared conversation state."""
 
     output: T

@@ -6,10 +6,7 @@ has not been reconstructed. See the
 [package index](https://pypi.org/project/typed-evals/)
 for published versions.
 
-The published baseline checked for this update is
-[0.2.1 on PyPI](https://pypi.org/project/typed-evals/0.2.1/).
-
-## 0.2.2 (unreleased)
+## 0.2.2
 
 ### Added
 
