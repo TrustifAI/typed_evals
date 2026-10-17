@@ -37,7 +37,7 @@ def sdk_client(handler, retries=0):
 
 def wire_response(answers):
     return {
-        "model": "jev-1.13.0",
+        "model": "jev-1.14.0",
         "usage": {"input_tokens": 25, "output_tokens": 0},
         "answers": answers,
     }
@@ -172,7 +172,7 @@ async def test_request_serialization_and_all_primitive_responses(sample):
     assert set(body) == {"state", "questions", "model"}
     assert set(body["questions"]) == {"faithfulness", "verdict", "coverage"}
     assert body["questions"]["faithfulness"]["type"] == "noul"
-    assert body["model"] == "jev-1.13.0"
+    assert body["model"] == "jev-1.14.0"
     row = report.results[0]
     assert row.metrics["faithfulness"].confidence is None
     assert row.metrics["verdict"].raw_score == 0.2

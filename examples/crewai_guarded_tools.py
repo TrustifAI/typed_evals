@@ -30,7 +30,8 @@ async def main():
     @guard_tool(
         policy="Only read tickets owned by Alice.",
         input="Read my support ticket.",
-        contexts=["Alice owns T-42. Bob owns T-99."],
+        contexts=["read_ticket reads a support ticket."],
+        authorization=["Alice owns T-42. Bob owns T-99."],
         backend=DemoJudge(),
     )
     async def read_ticket(ticket_id: str) -> str:

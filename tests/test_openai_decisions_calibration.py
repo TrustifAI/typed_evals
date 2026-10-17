@@ -127,7 +127,9 @@ def api():
 
 
 def config():
-    return CalibrationConfig(enabled=True, min_samples=20, min_validation_samples=10)
+    return CalibrationConfig(
+        enabled=True, algorithm="isotonic", min_samples=20, min_validation_samples=10
+    )
 
 
 def client_for(api):
@@ -151,7 +153,7 @@ async def test_native_fit_save_load_raw_not_provider_confidence_and_threshold_co
         backend = OpenAIDecisionsBackend(client=client)
         pipeline = await fit(backend)
         bundle = pipeline.calibration_bundle
-        assert bundle.schema_version == 2
+        assert bundle.schema_version == 3
         configuration = bundle.backend_provenance["configuration"]
         assert configuration["provider"] == "openai"
         assert configuration["backend"] == "openai-decisions"
@@ -212,6 +214,11 @@ async def test_native_calibration_rejects_incompatible_configuration_before_requ
             data = json.loads(artifact.read_text())
             data["schema_version"] = 1
             data.pop("backend_provenance")
+            for curve in data["curves"].values():
+                del curve["algorithm"]
+            for metric in data["report"]["metrics"].values():
+                del metric["algorithm"]
+                del metric["log_loss_improved"]
             artifact.write_text(json.dumps(data))
         other = EvaluationPipeline(metric_panel(), backend=backend, calibration=config())
         calls = len(api.calls)

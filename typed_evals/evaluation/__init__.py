@@ -13,13 +13,23 @@ from .evaluator import (
 from .pipeline import (
     EvaluationPipeline,
 )
+from .validation import (
+    MetricValidationReport,
+    ValidationReport,
+    avalidate_metrics,
+    validate_metrics,
+)
 
 __all__ = [
     "EvaluatedResponse",
     "EvaluationPipeline",
     "Evaluator",
+    "MetricValidationReport",
     "ResponseEvaluator",
+    "ValidationReport",
+    "avalidate_metrics",
     "aevaluate",
     "evaluate",
     "evaluated_by",
+    "validate_metrics",
 ]

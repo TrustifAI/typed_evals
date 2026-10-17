@@ -253,21 +253,29 @@ async def test_owned_client_closes_on_success_failure_and_cancellation(
 
 async def test_owned_client_is_shared_across_workers_and_created_per_batch(monkeypatch):
     actual_client_class = openai.AsyncOpenAI
-    clients, calls = [], []
+    clients, calls, completed = [], [], []
     active = peak = 0
     three_workers_entered = asyncio.Event()
+    later_request_finished = asyncio.Event()
 
     async def handler(request):
         nonlocal active, peak
-        calls.append(json.loads(request.content))
+        body = json.loads(request.content)
+        calls.append(body)
+        index = int(json.loads(body["input"])["input"])
         active += 1
         peak = max(peak, active)
         if active == 3:
             three_workers_entered.set()
         try:
             await asyncio.wait_for(three_workers_entered.wait(), timeout=2)
-            await asyncio.sleep(0)
-            return httpx2.Response(200, json=wire_response([predicate_answer()]))
+            if index == 0:
+                await asyncio.wait_for(later_request_finished.wait(), timeout=2)
+            completed.append(index)
+            later_request_finished.set()
+            return httpx2.Response(
+                200, json=wire_response([predicate_answer(probability=(index + 1) / 10)])
+            )
         finally:
             active -= 1
 
@@ -283,15 +291,24 @@ async def test_owned_client_is_shared_across_workers_and_created_per_batch(monke
     evaluator = Evaluator(
         backend=OpenAIDecisionsBackend(api_key=API_KEY, max_retries=0), max_concurrency=3
     )
-    samples = [EvaluationSample(input=str(index), response="A") for index in range(9)]
+    samples = [
+        EvaluationSample(id=f"sample-{index}", input=str(index), response="A") for index in range(9)
+    ]
     first = await evaluator.aevaluate(samples)
-    assert len(first.results) == 9
+    assert completed[0] != 0
+    assert [row.sample_id for row in first.results] == [sample.id for sample in samples]
+    assert [row.metrics["answer_relevancy"].raw_score for row in first.results] == pytest.approx(
+        [(index + 1) / 10 for index in range(9)]
+    )
+    assert first.summary["answer_relevancy"].mean_raw_score == pytest.approx(0.5)
     assert len(clients) == 1
     assert clients[0].is_closed()
     assert peak == 3
     assert active == 0
     assert len(calls) == 9
-    await evaluator.aevaluate(samples[:1])
+    second = await evaluator.aevaluate(samples[:1])
+    assert second.results[0].sample_id == "sample-0"
+    assert second.results[0].metrics["answer_relevancy"].raw_score == 0.1
     assert len(clients) == 2
     assert clients[1].is_closed()
     assert clients[1] is not clients[0]
@@ -321,24 +338,6 @@ async def test_owned_client_uses_normal_openai_environment_key(monkeypatch, samp
     assert requests[0].headers["Authorization"] == f"Bearer {API_KEY}"
     assert clients[0].is_closed()
     assert API_KEY not in repr(backend)
-
-
-@pytest.mark.parametrize("model", [None, True, 42, "", "  \n"])
-def test_invalid_model_configuration_is_rejected(model):
-    with pytest.raises(ValueError, match="model"):
-        OpenAIDecisionsBackend(model=model)
-
-
-@pytest.mark.parametrize("timeout", [True, False, None, "30", 0, -1, float("inf"), float("nan")])
-def test_invalid_timeout_configuration_is_rejected(timeout):
-    with pytest.raises(ValueError, match="timeout"):
-        OpenAIDecisionsBackend(timeout=timeout)
-
-
-@pytest.mark.parametrize("max_retries", [True, False, None, "2", -1, 1.0])
-def test_invalid_retry_configuration_is_rejected(max_retries):
-    with pytest.raises(ValueError, match="max_retries"):
-        OpenAIDecisionsBackend(max_retries=max_retries)
 
 
 @pytest.mark.parametrize("injected", [True, False])

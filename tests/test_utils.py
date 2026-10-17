@@ -1,10 +1,12 @@
 import asyncio
+import json
 import threading
 from contextvars import ContextVar
+from pathlib import Path
 
 import pytest
 
-from typed_evals._utils import run_sync
+from typed_evals._utils import run_sync, write_json
 
 
 async def test_run_sync_preserves_context_and_closes_worker_loop():
@@ -44,3 +46,34 @@ async def test_run_sync_propagates_errors_and_cancellation(error):
         run_sync(work)
     assert caught.value is error
     assert worker_loops[0].is_closed()
+
+
+def test_failed_atomic_report_replacement_preserves_existing_file_and_removes_temp(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "reports" / "report.json"
+    original = {"version": "previous", "response": "Paris"}
+    write_json(path, original)
+    previous_bytes = path.read_bytes()
+    replacement = {"version": "next", "response": "東京"}
+    attempted = []
+
+    def fail_replace(source, destination):
+        temporary = Path(source)
+        attempted.append(temporary)
+        assert temporary.parent == path.parent
+        assert json.loads(temporary.read_text(encoding="utf-8")) == replacement
+        assert Path(destination) == path
+        raise OSError("disk refused replacement")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("typed_evals._utils.os.replace", fail_replace)
+        with pytest.raises(OSError, match="disk refused replacement"):
+            write_json(path, replacement)
+    assert len(attempted) == 1
+    assert not attempted[0].exists()
+    assert list(path.parent.iterdir()) == [path]
+    assert path.read_bytes() == previous_bytes
+
+    write_json(path, replacement)
+    assert json.loads(path.read_text(encoding="utf-8")) == replacement

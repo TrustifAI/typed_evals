@@ -1,5 +1,6 @@
 import asyncio
 import json
+import warnings
 
 import pytest
 from conftest import FakeBackend
@@ -11,6 +12,8 @@ from typed_evals import (
     EvaluationSample,
     Evaluator,
     Faithfulness,
+    JudgeResponse,
+    Metric,
     ToolAccuracy,
     ToolProposal,
 )
@@ -76,13 +79,53 @@ def test_provider_error_record_does_not_leak_request_content(sample):
     assert report.results[0].metrics["answer_relevancy"].status == "error"
 
 
-async def test_concurrency_is_bounded_and_output_order_is_stable():
-    async_backend = FakeBackend(delay=0.001)
-    samples = [EvaluationSample(input=f"Q{i}", response="A", id=str(i)) for i in range(30)]
-    report = await Evaluator(backend=async_backend, max_concurrency=3).aevaluate(samples)
-    assert async_backend.peak == 3
-    assert [row.sample_id for row in report.results] == [str(i) for i in range(30)]
-    assert async_backend.sessions == async_backend.closed == 1
+async def test_concurrency_is_bounded_and_out_of_order_answers_stay_with_their_samples():
+    started = [asyncio.Event() for _ in range(6)]
+    release = [asyncio.Event() for _ in range(6)]
+    finished = [asyncio.Event() for _ in range(6)]
+    completion_order = []
+
+    class ControlledBackend(FakeBackend):
+        async def judge(self, state, questions):
+            index = int(state["input"])
+            self.calls.append((state, questions))
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            started[index].set()
+            try:
+                await release[index].wait()
+                completion_order.append(index)
+                return JudgeResponse(
+                    model=self.model,
+                    answers={"answer_relevancy": {"type": "noul", "noul": index / 10}},
+                )
+            finally:
+                self.active -= 1
+                finished[index].set()
+
+    backend = ControlledBackend()
+    samples = [EvaluationSample(input=str(i), response="A", id=f"row-{i}") for i in range(6)]
+    task = asyncio.create_task(Evaluator(backend=backend, max_concurrency=3).aevaluate(samples))
+    try:
+        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in started[:3])), 5)
+        assert len(backend.calls) == backend.active == 3
+        assert not any(event.is_set() for event in started[3:])
+        for index in (2, 1, 0, 5, 4, 3):
+            await asyncio.wait_for(started[index].wait(), 5)
+            release[index].set()
+            await asyncio.wait_for(finished[index].wait(), 5)
+        report = await asyncio.wait_for(task, 5)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    assert completion_order == [2, 1, 0, 5, 4, 3]
+    assert backend.peak == 3
+    assert [(row.sample_id, row.metrics["answer_relevancy"].score) for row in report.results] == [
+        (f"row-{i}", i / 10) for i in range(6)
+    ]
+    assert backend.active == 0
+    assert backend.sessions == backend.closed == 1
 
 
 @pytest.mark.parametrize("evaluator_type", [Evaluator, EvaluationPipeline])
@@ -115,7 +158,7 @@ def test_tool_identity_is_preserved_when_metric_is_unavailable(status):
         id="call_001",
         input="Find item 42",
         response="",
-        contexts=() if status == "skipped" else ("lookup(item_id: int) finds an item.",),
+        contexts=None if status == "skipped" else ("lookup(item_id: int) finds an item.",),
         proposed_tool_call=ToolProposal(name="lookup", arguments={"item_id": 42}),
     )
     evaluator = Evaluator(
@@ -133,13 +176,30 @@ def test_tool_identity_is_preserved_when_metric_is_unavailable(status):
 @pytest.mark.parametrize("sync", [False, True])
 async def test_failure_cancels_other_workers_and_closes_session(sync):
     class Failing(FakeBackend):
-        async def judge(self, state, questions):
-            if state["input"] == "fail":
-                await asyncio.sleep(0)
-                raise RuntimeError("failed")
-            return await super().judge(state, questions)
+        def __init__(self):
+            super().__init__()
+            self.started = None
+            self.cancelled = False
 
-    backend = Failing(delay=10)
+        async def judge(self, state, questions):
+            # The sync entry point can run in another thread's loop. Create this
+            # synchronization primitive in the loop that actually judges the batch.
+            if self.started is None:
+                self.started = asyncio.Event()
+            if state["input"] == "fail":
+                await asyncio.wait_for(self.started.wait(), 5)
+                raise RuntimeError("failed")
+            self.active += 1
+            self.started.set()
+            try:
+                await asyncio.wait_for(asyncio.Event().wait(), 5)
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+            finally:
+                self.active -= 1
+
+    backend = Failing()
     evaluator = Evaluator(backend=backend)
     samples = [
         EvaluationSample(input="wait", response="A"),
@@ -151,6 +211,7 @@ async def test_failure_cancels_other_workers_and_closes_session(sync):
         else:
             await evaluator.aevaluate(samples)
     assert backend.active == 0
+    assert backend.cancelled
     assert backend.closed == 1
 
 
@@ -178,14 +239,113 @@ def test_empty_batch_does_not_open_api_session(backend):
     assert backend.sessions == 0
 
 
-def test_report_contains_raw_and_active_score(sample, backend, tmp_path):
-    report = Evaluator(backend=backend).evaluate([sample])
-    report.save(tmp_path / "nested" / "report.json")
-    data = report.to_dict()
-    assert report.results[0].tool_name is None
-    assert data["results"][0]["tool_name"] is None
-    assert data["results"][0]["metrics"]["answer_relevancy"]["score"] == 0.8
-    assert data["results"][0]["passed"] is True
+@pytest.mark.parametrize("evaluator_type", [Evaluator, EvaluationPipeline])
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_unused_contexts_warn_once_per_batch(evaluator_type, asynchronous, backend):
+    samples = [
+        EvaluationSample(input="Q", response="A", contexts=("private context",)),
+        EvaluationSample(input="Q2", response="A2"),
+        EvaluationSample(input="Q3", response="A3", contexts=("other context",)),
+    ]
+    evaluator = evaluator_type([AnswerRelevancy()], backend=backend)
+    with pytest.warns(UserWarning, match="contexts were supplied for 2 sample") as caught:
+        report = await evaluator.aevaluate(samples) if asynchronous else evaluator.evaluate(samples)
+    assert len(caught) == 1
+    assert "preset='rag'" in str(caught[0].message)
+    assert "private context" not in str(caught[0].message)
+    assert len(report.results) == len(samples)
+    assert all("contexts" not in state for state, _ in backend.calls)
+
+
+@pytest.mark.parametrize("selection", ["default", "rag", "custom"])
+def test_used_or_absent_contexts_do_not_warn(selection, sample, backend):
+    if selection == "default":
+        samples = [sample.model_copy(update={"contexts": ()})]
+        evaluator = Evaluator(backend=backend)
+    elif selection == "rag":
+        samples = [sample]
+        evaluator = Evaluator(preset="rag", backend=backend)
+    else:
+        samples = [sample]
+        metric = Metric(
+            name="custom_context_check",
+            instructions="Is the answer grounded in contexts?",
+            required_fields=("input", "response", "contexts"),
+            pass_definition="The answer is grounded in contexts",
+        )
+        evaluator = Evaluator([metric], backend=backend)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        evaluator.evaluate(samples)
+    if selection != "default":
+        assert backend.calls[0][0]["contexts"] == list(sample.contexts)
+
+
+@pytest.mark.parametrize("include_relevancy", [False, True])
+def test_skipped_context_metric_does_not_consume_evidence(include_relevancy, sample, backend):
+    context_metric = Metric(
+        name="reference_grounding",
+        instructions="Is the answer grounded in contexts and consistent with the reference?",
+        required_fields=("input", "response", "contexts", "reference"),
+        pass_definition="The answer meets both checks",
+    )
+    metrics = [context_metric, AnswerRelevancy()] if include_relevancy else [context_metric]
+    without_reference = sample.model_copy(update={"reference": None})
+    evaluator = Evaluator(metrics, backend=backend, missing="skip")
+    with pytest.warns(UserWarning, match="contexts were supplied for 1 sample") as caught:
+        report = evaluator.evaluate([sample, without_reference])
+    assert len(caught) == 1
+    assert report.results[1].metrics[context_metric.name].status == "skipped"
+    assert backend.calls[0][0]["contexts"] == list(sample.contexts)
+    assert len(backend.calls) == (2 if include_relevancy else 1)
+    if include_relevancy:
+        assert "contexts" not in backend.calls[1][0]
+
+
+def test_unused_context_warning_is_emitted_before_opening_a_session(sample, backend):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        with pytest.raises(UserWarning, match="contexts were supplied"):
+            Evaluator(backend=backend).evaluate([sample])
+    assert backend.sessions == 0
+
+
+def test_saved_report_excludes_unavailable_metrics_from_means_and_pass_rates(tmp_path):
+    def answer(state, questions):
+        if state["response"] == "error":
+            raise RuntimeError("private provider payload")
+        return {"faithfulness": {"type": "noul", "noul": float(state["response"])}}
+
+    backend = FakeBackend(answer)
+    samples = [
+        EvaluationSample(input="Q", response=value, contexts=("Evidence",), id=value)
+        for value in ("0.8", "0.2", "error")
+    ] + [EvaluationSample(input="Q", response="missing", id="skipped")]
+    report = Evaluator(
+        [Faithfulness(threshold=0.8)], backend=backend, missing="skip", errors="record"
+    ).evaluate(samples)
+    path = tmp_path / "nested" / "report.json"
+    report.save(path)
+    data = json.loads(path.read_text())
+
+    assert data["summary"]["faithfulness"] == {
+        "evaluated": 2,
+        "skipped": 1,
+        "errors": 1,
+        "passed": 1,
+        "mean_raw_score": 0.5,
+        "mean_score": 0.5,
+        "pass_rate": 0.5,
+    }
+    assert [row["sample_id"] for row in data["results"]] == ["0.8", "0.2", "error", "skipped"]
+    assert [row["passed"] for row in data["results"]] == [True, False, None, None]
+    for row, raw in zip(data["results"], (0.8, 0.2, None, None), strict=True):
+        metric = row["metrics"]["faithfulness"]
+        assert metric["raw_score"] == metric["score"] == raw
+        assert metric["calibrated_probability"] is None
+        assert row["tool_name"] is None
+    assert "private provider payload" not in path.read_text()
+    assert len(backend.calls) == 3
 
 
 @pytest.mark.parametrize(

@@ -1,9 +1,11 @@
 """Runnable synthetic pipeline demonstration. No API calls and no accuracy claims."""
 
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 from typed_evals import (
     AnswerRelevancy,
+    BaseBackend,
     CalibrationConfig,
     CalibrationExample,
     EvaluationPipeline,
@@ -12,8 +14,9 @@ from typed_evals import (
 )
 
 
-class SyntheticBackend:
-    model = "synthetic-demo-not-jev"
+@dataclass
+class SyntheticBackend(BaseBackend):
+    model: str = "synthetic-demo-not-jev"
 
     @asynccontextmanager
     async def session(self):

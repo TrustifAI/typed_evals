@@ -55,7 +55,9 @@ def rows(prefix, size):
 
 
 def config():
-    return CalibrationConfig(enabled=True, min_samples=20, min_validation_samples=10)
+    return CalibrationConfig(
+        enabled=True, algorithm="isotonic", min_samples=20, min_validation_samples=10
+    )
 
 
 @pytest.fixture
@@ -112,7 +114,7 @@ async def test_image_calibration_fit_save_load_apply_excludes_image_bytes(image_
         backend = OpenAIDecisionsBackend(client=client)
         pipeline = await fit(backend)
         bundle = pipeline.calibration_bundle
-        assert bundle.schema_version == 2
+        assert bundle.schema_version == 3
         assert bundle.evidence_fields == ("images", "input", "response")
         assert bundle.requested_model == "gpt-6-luna"
         assert bundle.observed_model == "gpt-6-luna-snapshot"

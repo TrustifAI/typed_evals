@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Callable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, get_type_hints
+from typing import TYPE_CHECKING, Any, cast, get_type_hints
 
 from typed_evals.backends import Backend
 from typed_evals.data.models import ToolProposal
@@ -21,6 +21,7 @@ def guard_tool(
     policy: str,
     input: str | Callable[[Mapping[str, Any]], str],
     contexts: Sequence[str] | Callable[[Mapping[str, Any]], Sequence[str]],
+    authorization: Sequence[str] | Callable[[Mapping[str, Any]], Sequence[str]],
     threshold: float = 0.9,
     backend: Backend | None = None,
     on_fail: FailureAction = "block",
@@ -31,7 +32,8 @@ def guard_tool(
     """Decorate a Python function to produce a guarded native CrewAI Tool.
 
     Use this in place of crewai.tools.tool, then register the result with the agent.
-    input/contexts callbacks receive bound JSON arguments, including defaults.
+    input/contexts/authorization callbacks receive bound JSON arguments, including defaults.
+    Supply authenticated permission records in authorization, separate from contexts.
     Capture request-specific evidence in a tool factory; model-generated
     arguments are not authenticated runtime context.
 
@@ -68,6 +70,7 @@ def guard_tool(
             policy=policy,
             input=input,
             contexts=contexts,
+            authorization=authorization,
             threshold=threshold,
             backend=backend,
             on_fail=on_fail,
@@ -90,7 +93,8 @@ def guard_tool(
         registered = tool(tool_name)(wrapped)
         return GuardedTool(
             name=registered.name,
-            description=inspect.getdoc(function),
+            # CrewAI's tool decorator has already required the function's docstring.
+            description=cast(str, inspect.getdoc(function)),
             args_schema=registered.args_schema,
             result_schema=registered.result_schema,
             func=wrapped,

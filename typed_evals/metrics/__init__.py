@@ -13,9 +13,11 @@ from .base import (
     Metric,
 )
 from .rag import (
+    AnswerCompleteness,
     AnswerCorrectness,
     AnswerRelevancy,
     ContextRelevance,
+    ContextSufficiency,
     Faithfulness,
 )
 from .registry import (
@@ -24,10 +26,12 @@ from .registry import (
 )
 
 __all__ = [
+    "AnswerCompleteness",
     "AnswerCorrectness",
     "AnswerRelevancy",
     "BUILTIN_METRICS",
     "ContextRelevance",
+    "ContextSufficiency",
     "EVALUATION_POLICY",
     "EVIDENCE_FIELDS",
     "Faithfulness",

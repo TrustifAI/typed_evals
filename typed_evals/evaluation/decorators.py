@@ -6,11 +6,9 @@ import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import wraps
-from typing import Any, Generic, Protocol, TypeVar
+from typing import Any, Protocol
 
 from typed_evals.data.models import EvaluationReport, EvaluationSample, SampleResult
-
-T = TypeVar("T")
 
 
 class ResponseEvaluator(Protocol):
@@ -24,11 +22,16 @@ class ResponseEvaluator(Protocol):
 
 
 @dataclass(frozen=True)
-class EvaluatedResponse(Generic[T]):
+class EvaluatedResponse[T]:
     """Preserves the application's native output, alongside structured evaluation metadata."""
 
     output: T
     evaluation: SampleResult | EvaluationReport
+
+
+def _require_materialized_output(output: Any) -> None:
+    if inspect.isgenerator(output) or inspect.isasyncgen(output) or inspect.isawaitable(output):
+        raise TypeError("Streaming and awaitable outputs must be materialized before evaluation")
 
 
 def evaluated_by(
@@ -41,6 +44,8 @@ def evaluated_by(
     Return one EvaluationSample for a SampleResult, or a sequence of samples for an
     EvaluationReport. Empty sequences produce an empty report without judging any samples.
     Supports ordinary sync/async functions. Materialize streaming output before evaluation.
+    Returned generators, async generators, and unresolved awaitables are rejected before
+    mapping; callers remain responsible for consuming, awaiting, or closing those objects.
     Evaluation failures propagate; this prevents silently presenting an unevaluated result as trusted.
     """
 
@@ -52,6 +57,7 @@ def evaluated_by(
             @wraps(function)
             async def async_wrapper(*args: Any, **kwargs: Any) -> EvaluatedResponse:
                 output = await function(*args, **kwargs)
+                _require_materialized_output(output)
                 samples = sample_builder(output, args, kwargs)
                 evaluation = (
                     await evaluator.aevaluate_one(samples)
@@ -65,6 +71,7 @@ def evaluated_by(
         @wraps(function)
         def wrapper(*args: Any, **kwargs: Any) -> EvaluatedResponse:
             output = function(*args, **kwargs)
+            _require_materialized_output(output)
             samples = sample_builder(output, args, kwargs)
             evaluation = (
                 evaluator.evaluate_one(samples)

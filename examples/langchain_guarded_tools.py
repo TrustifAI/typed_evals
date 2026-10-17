@@ -32,8 +32,9 @@ def create_ticket_agent(model, *, backend=None):
     @tool
     @guard_tool(
         policy="Only read tickets owned by authenticated customer Alice.",
+        contexts=["read_ticket reads the complete text of a support ticket."],
         # These authorization facts belong to the application, not the model.
-        contexts=[
+        authorization=[
             "Authenticated customer: Alice. Alice owns T-42. Bob owns T-99. "
             "Alice has no permission to read Bob's tickets.",
         ],

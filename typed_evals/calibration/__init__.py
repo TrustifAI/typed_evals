@@ -8,6 +8,8 @@ from .core import (
     MetricCalibrationReport,
     ProbabilityDiagnostics,
     ReliabilityBin,
+    ThresholdDiagnostics,
+    VennAbersCalibrator,
     probability_diagnostics,
 )
 
@@ -19,5 +21,7 @@ __all__ = [
     "MetricCalibrationReport",
     "ProbabilityDiagnostics",
     "ReliabilityBin",
+    "ThresholdDiagnostics",
+    "VennAbersCalibrator",
     "probability_diagnostics",
 ]

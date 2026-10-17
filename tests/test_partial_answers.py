@@ -87,7 +87,7 @@ class RefitBackend(FakeBackend):
 def test_failed_refit_with_unavailable_labeled_judgment_preserves_valid_bundle():
     backend = RefitBackend()
     pipeline = EvaluationPipeline(
-        [AnswerRelevancy()],
+        [AnswerRelevancy(threshold=0.7)],
         backend=backend,
         calibration=CalibrationConfig(enabled=True, min_samples=20, min_validation_samples=10),
         errors="record",
@@ -95,8 +95,22 @@ def test_failed_refit_with_unavailable_labeled_judgment_preserves_valid_bundle()
     rows, validation = calibrated_rows(), calibrated_rows("validation")
     pipeline.fit(rows, validation_data=validation)
     previous = pipeline.calibration_bundle
+    baseline = pipeline.evaluate_one(
+        EvaluationSample(input="production before refit", response="0.8")
+    ).metrics["answer_relevancy"]
     backend.unavailable = True
     with pytest.raises(DecisionRefusalError):
-        pipeline.fit(rows, validation_data=validation)
+        pipeline.fit(calibrated_rows("refit"), validation_data=calibrated_rows("refit-validation"))
     assert pipeline.calibration_bundle is previous
-    assert not pipeline._fitting
+
+    backend.unavailable = False
+    recovered = pipeline.evaluate_one(
+        EvaluationSample(input="new production evidence after failed refit", response="0.8")
+    )
+    metric = recovered.metrics["answer_relevancy"]
+    assert metric.status == "ok"
+    assert metric.raw_score == 0.8
+    assert metric.calibrated_probability == pytest.approx(baseline.calibrated_probability)
+    assert 0.5 < metric.score < 0.7
+    assert metric.passed is recovered.passed is False
+    assert backend.sessions == backend.closed

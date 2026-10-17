@@ -1,4 +1,8 @@
-"""Custom metric definitions. Importing this module makes no API calls."""
+"""Custom Noul, Choice, and ordinal Score definitions; importing makes no API calls.
+
+The custom completeness rubric demonstrates normalized ordinal scoring, not a
+pass probability. Use the built-in AnswerCompleteness for its binary pass event.
+"""
 
 from typed_evals import Metric
 

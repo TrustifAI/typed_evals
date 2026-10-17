@@ -14,7 +14,6 @@ from typed_evals import (
     load_dataset,
 )
 from typed_evals._utils import digest
-from typed_evals.data import ImageInput as DataImageInput
 from typed_evals.metrics.base import EVALUATION_POLICY
 
 
@@ -32,20 +31,32 @@ def image_metric(**kwargs):
     )
 
 
-def test_image_input_is_public_and_has_portable_defaults():
-    assert DataImageInput is ImageInput
-    evidence = image()
-    assert evidence.detail == "auto"
-    assert evidence.label is None
-    assert evidence.model_dump(mode="json") == {
-        "data_url": "data:image/png;base64,aW1hZ2UgZXZpZGVuY2U=",
-        "detail": "auto",
-        "label": None,
-    }
+def test_minimal_image_dataset_restores_defaults_and_evidence_bytes(tmp_path):
+    path = tmp_path / "minimal.json"
+    path.write_text(
+        '[{"input":"Describe", "response":"A", '
+        '"images":[{"data_url":"data:image/png;base64,aW1hZ2UgZXZpZGVuY2U="}]}]'
+    )
+    sample = load_dataset(path)[0]
+    assert sample.images == (image(),)
+    assert sample.state(image_metric().required_fields)["images"] == [
+        {
+            "data_url": "data:image/png;base64,aW1hZ2UgZXZpZGVuY2U=",
+            "detail": "auto",
+            "label": None,
+        }
+    ]
 
 
-@pytest.mark.parametrize("mime_type", ["image/png", "image/jpeg", "image/webp", "image/gif"])
-@pytest.mark.parametrize("detail", ["auto", "low", "high", "original"])
+@pytest.mark.parametrize(
+    "mime_type,detail",
+    [
+        ("image/png", "auto"),
+        ("image/jpeg", "low"),
+        ("image/webp", "high"),
+        ("image/gif", "original"),
+    ],
+)
 def test_image_bytes_accept_supported_mime_and_detail(mime_type, detail):
     evidence = ImageInput.from_bytes(
         b"opaque image bytes", mime_type=mime_type, detail=detail, label="Reference photo"
@@ -97,16 +108,27 @@ def test_image_fields_are_strict(kwargs):
         ImageInput(**{**image().model_dump(), **kwargs})
 
 
-def test_image_inputs_are_frozen():
-    evidence = image()
-    with pytest.raises(ValidationError, match="frozen"):
-        evidence.detail = "high"
+def test_image_evidence_and_identity_are_isolated_from_caller_owned_containers():
+    evidence = image(label="Reference").model_dump(mode="json")
+    images = [evidence]
+    sample = EvaluationSample(input="Describe", response="A", images=images)
+    original_hash = sample.content_hash
+
+    evidence["data_url"] = ImageInput.from_bytes(b"changed image", mime_type="image/png").data_url
+    evidence["label"] = "Changed label"
+    images.append(image(label="Unrelated").model_dump(mode="json"))
+    exported = sample.state(image_metric().required_fields)
+    exported["images"][0]["detail"] = "high"
+
+    assert sample.images == (image(label="Reference"),)
+    assert sample.content_hash == original_hash
+    assert sample.state(image_metric().required_fields)["images"][0]["detail"] == "auto"
 
 
 def test_equivalent_base64_encodings_have_one_evidence_identity():
     canonical = ImageInput(data_url="data:image/png;base64,Zg==")
     alias = ImageInput(data_url="data:image/png;base64,Zh==")
-    assert alias.data_url == canonical.data_url
+    assert alias.data_url == canonical.data_url == "data:image/png;base64,Zg=="
     first = EvaluationSample(input="Describe", response="A", images=(canonical,))
     second = EvaluationSample(input="Describe", response="A", images=(alias,))
     assert first.content_hash == second.content_hash
@@ -205,6 +227,17 @@ def test_text_sample_hash_preserves_existing_identity(proposal):
     )
 
 
+def test_authorization_is_validated_and_enters_content_identity():
+    base = EvaluationSample(input="Read T-42", response="", contexts=("Tool specification",))
+    allowed = base.model_copy(update={"authorization": ("Alice may read T-42",)})
+    denied = base.model_copy(update={"authorization": ("Alice may not read T-42",)})
+    assert len({base.content_hash, allowed.content_hash, denied.content_hash}) == 3
+    assert allowed.state(("authorization",)) == {"authorization": ["Alice may read T-42"]}
+    assert "authorization" not in allowed.state(("input", "response", "contexts"))
+    with pytest.raises(ValidationError):
+        EvaluationSample(input="Read", response="", authorization=("  ",))
+
+
 def test_image_hash_includes_bytes_order_detail_and_label_but_ignores_metadata():
     evidence = image()
     other = ImageInput.from_bytes(b"different image", mime_type="image/png")
@@ -242,29 +275,39 @@ def test_image_selection_uses_required_fields_and_reports_missing_evidence():
 
 
 @pytest.mark.parametrize(
-    "required_fields,state_schema",
+    "required_fields,fingerprint",
     [
-        (("input", "response"), 1),
-        (("input", "response", "proposed_tool_call"), 2),
-        (("input", "response", "images"), 3),
-        (("input", "response", "proposed_tool_call", "images"), 3),
+        (("input", "response"), "d84ecb496dd2f8b180abaa4311f428d0c499b539befb9e194039140d336e803f"),
+        (
+            ("input", "response", "proposed_tool_call"),
+            "07b4fbf17d8b933ecceafa29617229fb66879d5cc8a5b7ebf26f34562795dfcf",
+        ),
+        (
+            ("input", "response", "images"),
+            "0fc165dde28993170ebaca9966a27e4054e95977fac8ec3756e9a8bb77011e54",
+        ),
+        (
+            ("input", "response", "proposed_tool_call", "images"),
+            "5648e29ae629247117cafca2042a3e224e24c2c2099e1b0fab5d4d05c20fd09d",
+        ),
     ],
 )
-def test_metric_image_schema_and_modality_preserve_text_contract(required_fields, state_schema):
+def test_metric_fingerprints_bind_revised_evidence_policy(required_fields, fingerprint):
     metric = Metric(
         name="accuracy",
         instructions="Does the response match the evidence?",
         pass_definition="The response matches.",
         required_fields=required_fields,
     )
-    assert metric.fingerprint == digest(
-        {
-            "metric": metric.model_dump(mode="json", exclude={"threshold"}),
-            "evaluation_policy": EVALUATION_POLICY,
-            "state_schema": state_schema,
-        }
-    )
-    expected = {"question": metric.instructions, "evaluation_policy": EVALUATION_POLICY}
+    # The revised evidence policy deliberately invalidates old calibration identities.
+    # Recomputing the expected value with digest() would hide serialization regressions.
+    assert metric.fingerprint == fingerprint
+    assert metric.model_copy(update={"threshold": 0.9}).fingerprint == fingerprint
+    expected = {
+        "question": metric.instructions,
+        "evaluation_policy": EVALUATION_POLICY,
+        "allowed_evidence_fields": list(required_fields),
+    }
     if "images" in required_fields:
         expected["required_modalities"] = ["text", "image"]
     assert metric.question().instructions == expected

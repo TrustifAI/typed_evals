@@ -9,6 +9,7 @@ import pytest
 from pydantic import create_model
 
 from typed_evals import Evaluator, Metric, ToolAccuracy
+from typed_evals.errors import MissingInputError
 
 
 @pytest.mark.parametrize(
@@ -83,7 +84,8 @@ result = guard.call_tool(
     {"read_ticket": lambda ticket_id: ticket_id},
     EvaluationSample(
         input="Read ticket T-42", response="",
-        contexts=("read_ticket(ticket_id: str) reads a ticket; the customer owns T-42.",),
+        contexts=("read_ticket(ticket_id: str) reads a ticket.",),
+        authorization=("The customer owns T-42.",),
         proposed_tool_call=ToolProposal(name="read_ticket", arguments={"ticket_id": "T-42"}),
     ),
 )
@@ -103,10 +105,15 @@ assert evaluator.metrics[0].criteria["true"] != "caller mutation"
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("invalid", [None, {}, ToolAccuracy, object()])
+@pytest.mark.parametrize(
+    "invalid", [None, {"instructions": "PRIVATE_METRIC_DEFINITION"}, ToolAccuracy, object()]
+)
 def test_invalid_metric_message_identifies_entry_without_echoing_value(invalid):
-    with pytest.raises(ValueError, match=r"metrics\[1\] must be a typed_evals Metric instance"):
+    with pytest.raises(
+        ValueError, match=r"metrics\[1\] must be a typed_evals Metric instance"
+    ) as caught:
         Evaluator([ToolAccuracy(), invalid])
+    assert "PRIVATE_METRIC_DEFINITION" not in str(caught.value)
 
 
 def test_foreign_model_called_metric_is_not_accepted():
@@ -119,13 +126,17 @@ def test_foreign_model_called_metric_is_not_accepted():
         Evaluator([instance])
 
 
-def test_metric_subclass_behavior_is_preserved():
+def test_metric_subclass_behavior_is_preserved_during_evaluation(backend, sample):
     class CustomMetric(Metric):
         def missing_fields(self, sample):
             return ["custom_evidence"]
 
     metric = CustomMetric(name="custom", instructions="Check", pass_definition="Pass")
-    owned = Evaluator([metric]).metrics[0]
+    evaluator = Evaluator([metric], backend=backend)
+    owned = evaluator.metrics[0]
     assert type(owned) is CustomMetric
     assert owned is not metric
-    assert owned.missing_fields(None) == ["custom_evidence"]
+    with pytest.raises(MissingInputError, match="custom: missing custom_evidence"):
+        evaluator.evaluate_one(sample)
+    assert not backend.calls
+    assert backend.sessions == 0

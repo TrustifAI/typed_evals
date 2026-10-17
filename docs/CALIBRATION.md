@@ -5,6 +5,17 @@
 Calibration is **off by default**. When enabled, the pipeline must be fitted or
 loaded before evaluation; it never silently falls back to raw scores.
 
+The default `algorithm="auto"` chooses Venn–Abers for a metric with fewer than
+2,000 labeled training rows, and isotonic for 2,000 or more. Count only that
+metric's labels after the hold-out split; sparse labels can cause different
+metrics in one panel to use different algorithms. The cutoff is a configurable
+heuristic, not an established sample-size guarantee. Both algorithms can worsen
+held-out performance.
+
+Install `python -m pip install 'typed-evals[calibration]'` to support isotonic
+fitting. Venn–Abers fitting and prediction need no scikit-learn dependency. The
+pipeline checks required fitting dependencies before any judge requests.
+
 To try the example below, run it from the repository root with the supplied
 [`labeled.jsonl`](../examples/assets/labeled.jsonl) and
 [`test.jsonl`](../examples/assets/test.jsonl). These fictional
@@ -20,7 +31,8 @@ to exercise the pipeline, and replace them with representative, human-reviewed
 labels before interpreting calibration probabilities or quality improvements.
 The test file contains evaluation samples without labels and shares no scenario
 groups or sample content with the labeled file. Running this example uses the
-Jev API and requires `TYPESAFE_API_KEY` and the calibration dependencies above.
+Jev API and requires `TYPESAFE_API_KEY`. Its 128 training rows per metric select
+Venn–Abers under the default configuration.
 
 ```python
 from typed_evals import (
@@ -51,9 +63,29 @@ print(pipeline.calibration_report)
 
 The default automatic hold-out uses 20% of independent sample groups. Each metric
 needs at least **100 labeled training rows**, **20 held-out rows**, and both
-classes on each side. These are input safeguards, not a statistical guarantee.
+classes on each side: at least two examples per class in training and one per
+class in validation. `min_class_samples` controls the training class minimum;
+validation always requires at least one of each class. These are input safeguards,
+not a statistical guarantee.
 Use several hundred representative expert-labeled examples when possible, and
 inspect the held-out report. You can explicitly lower the minima for experiments.
+
+Choose an algorithm independently of those input minima:
+
+```python
+# Select by the number of labeled training rows for each metric.
+config = CalibrationConfig(enabled=True, algorithm="auto", isotonic_min_samples=2000)
+
+# Explicit choices ignore the automatic selection cutoff.
+small_data_config = CalibrationConfig(enabled=True, algorithm="venn_abers")
+isotonic_config = CalibrationConfig(enabled=True, algorithm="isotonic")
+```
+
+`algorithm` accepts `"auto"`, `"venn_abers"`, or `"isotonic"`.
+`isotonic_min_samples` must be an integer of at least 2; it changes only automatic
+algorithm selection, not `min_samples` or class-count validation. Explicit
+isotonic fitting remains available for small datasets, where its exact 0/1
+outputs can cause large log loss on later errors.
 
 For controlled or temporal splits, provide your own independent validation set:
 
@@ -68,8 +100,37 @@ report = pipeline.evaluate(load_dataset("examples/assets/test.jsonl"))
 The deployed curve uses **only the training partition**. The pipeline does not
 refit on the hold-out after reporting performance. Reports include raw and
 calibrated Brier score, log loss, binary ECE, reliability bins, and accuracy at
-0.5. Improvement is measured, not assumed. A worse held-out Brier score is
-explicitly recorded; fitting does not automatically approve a model for deployment.
+0.5. Each metric report records its selected `algorithm`, `raw_kind`,
+`brier_improved`, and `log_loss_improved`. For `normalized_ordinal_score` and
+`relevance_fraction`, the raw Brier, ECE, and log-loss diagnostics treat the signal
+as a numeric probability proxy; they do not give it event-probability semantics.
+The calibrated diagnostics assess predictions of the binary metric-pass label.
+Notes flag held-out Brier score or log loss that did not improve. Improvement is
+measured, not assumed; fitting does not automatically approve a model for deployment.
+
+Each report also includes `raw.at_threshold` and `calibrated.at_threshold` at the
+metric's configured threshold: confusion counts, false acceptance and rejection
+rates, precision, recall, accuracy, and balanced accuracy. False acceptance means
+passing a human-labeled failure (`FP / (FP + TN)`); false rejection means failing
+a human-labeled pass (`FN / (FN + TP)`). Undefined rates are `None`, not zero.
+`constant_prior_brier` scores a constant predictor using the training positive
+rate on the same held-out rows. Better calibration alone does not demonstrate a
+useful classifier. These diagnostics describe the threshold at fit time; changing
+thresholds requires fresh independent validation, not refitting the curve.
+
+Every fitting and hold-out row must contain the evidence for the **entire
+configured panel**, including metrics with no label on that row. Sparse labels
+remain supported. Calibrated evaluation also requires the complete panel on every
+sample; `missing="skip"` cannot silently remove a question or its evidence while
+reusing a curve. Missing evidence fails before any judge requests. Uncalibrated
+evaluation still supports explicit skips.
+
+The revised evaluation instructions declare each question's allowed evidence
+fields. Updated rubrics and presets change calibration identity; refit older
+artifacts against the new questions. Older reports load with `raw_kind=None` and
+unavailable threshold or baseline diagnostics when those fields were not saved;
+loading does not invent historical measurements. Re-saving v1/v2 artifacts keeps
+their original report schema.
 
 Reload without training again:
 
@@ -84,9 +145,99 @@ result = production.evaluate_one(sample)  # A sample outside the fitting/validat
 
 Changing metric wording, criteria, evidence fields, version, question panel/order,
 backend/compiler configuration, or the requested/observed model version invalidates
-the artifact. Changing an
-acceptance threshold does not. Save custom metric definitions in your own source
-alongside the artifact. JSON knots are validated and restored without pickle.
+the artifact. Context-relevance identity also binds its aggregation protocol,
+segmentation version, granularity, unit threshold, and questions per call.
+Changing an aggregate acceptance threshold does not invalidate the artifact.
+Save custom metric definitions in your own source
+alongside the artifact. JSON predictor data is validated and restored without
+pickle or scikit-learn inference dependencies. Loading an artifact uses its saved
+algorithm; the current configuration does not switch a previously fitted curve.
+
+After choosing a curve and thresholds, use
+[`validate_metrics`](EVALUATION.md#validate-a-metric-panel) on a separate labeled
+test set to inspect coverage, decision errors, and ranking performance. Saved
+fit/hold-out overlap checks remain enforced when you supply the fitted bundle.
+`validate_metrics` and `avalidate_metrics` do not fit curves or tune thresholds.
+Their coverage is successful labeled judgments divided by all labels for that
+metric; skipped/error judgments reduce coverage and do not become zero scores.
+Their `majority_baseline_accuracy` is the larger class fraction in that evaluated
+subset, not a predictor fitted on training data. This differs from the fit
+report's training-prior `constant_prior_brier` baseline. ROC-AUC is unavailable
+when the evaluated labels contain only one class. Without a calibration bundle,
+validation honors the evaluator's missing-evidence policy; with one, the complete
+panel is required.
+
+## Calibrate context relevance
+
+`ContextRelevance()` now supplies a `relevance_fraction` raw signal, rather than
+the probability that at least one passage is useful. Its input to calibration is
+the fraction of deterministic source units whose relevance probability meets
+`unit_threshold`. One relevant unit among ten gives raw score `0.1`; this is not
+a 10% probability of human acceptance. Annotate each retrieval with a binary
+label expressing your application's acceptable relevance level. The fitted curve
+maps the aggregate fraction to `P(human context-relevance label = 1)`; it does not
+calibrate the individual unit probabilities or change the retained unit counts.
+
+Keep the same `granularity` (`"sentence"` by default, or `"passage"`),
+`unit_threshold` (`0.5` by default), and `questions_per_call` (`32` by default)
+for fitting and inference. All three settings, the deterministic segmentation
+version, and the isolated unit-execution protocol enter calibration identity.
+Changing any requires refitting because it can change the judge signal.
+`threshold` remains the final decision policy: it applies to the calibrated
+probability when a curve exists, otherwise to the raw fraction. Changing only
+that aggregate threshold requires independent decision-policy validation.
+
+Refit panels that contain the former whole-context `ContextRelevance`, including
+the RAG preset. Adding the new aggregation machinery preserves the established
+identities of unrelated single-judgment metrics; it does not by itself invalidate
+a panel that contains no context relevance. Other rubric, model, and panel changes
+still follow the compatibility rules above.
+
+Explicit empty retrieval (`contexts=[]` or `()`) produces raw fraction `0.0`
+without a unit request; omitted/`None` contexts remain missing evidence, and blank
+passage strings are rejected during sample validation. If a sample needs no other
+judge request, its result has `model=None` and empty usage rather than an invented
+observed model. A fitted curve still maps that raw zero to its learned acceptance
+probability; the calibrated value need not be zero. Fitting accepts these
+deterministic rows alongside actual judge responses, but requires at least one
+observed model across the fit/hold-out panel and rejects differing observed
+versions. An entirely request-free fit cannot establish a model identity.
+
+Any unavailable unit makes the aggregate unavailable; fitting stops on unavailable
+judgments anywhere in its configured panel, including unlabeled metrics. It never
+fits a silently reduced denominator. Context-relevance reports retain source-span
+addresses, counts, and unit probabilities without raw source text. Calibration artifacts retain the
+curve and configuration, not those source passages. See the
+[unit evaluation contract](EVALUATION.md#diagnose-individual-claims-and-passages).
+
+## Use Venn–Abers directly
+
+The public calibrator accepts raw scores and binary labels from a separate
+calibration set:
+
+```python
+from typed_evals import VennAbersCalibrator
+
+curve = VennAbersCalibrator.fit(
+    scores=[0.1, 0.2, 0.4, 0.6, 0.8, 0.9],
+    labels=[0, 0, 1, 0, 1, 1],
+)
+p0, p1 = curve.predict_interval(0.7)
+probability = curve.predict(0.7)
+```
+
+This implements inductive Venn–Abers prediction. For the queried score, it
+computes the isotonic result after adding a hypothetical label 0 (`p0`), then
+after adding label 1 (`p1`), including tied-score pooling. `predict()` returns
+`p1 / (1 - p0 + p1)`, the point prediction that minimizes worst-case regret for
+log loss. It stays strictly between 0 and 1. The pair `(p0, p1)` is a
+multiprobability prediction, **not a confidence interval**; the combined point
+prediction does not inherit a perfect-calibration guarantee. See the original
+[Venn–Abers paper, section 4](https://auai.org/uai2014/proceedings/individuals/166.pdf).
+
+The calibrator precomputes its prediction lookup in `O(n log n)` time when
+fitted, then uses `O(log n)` lookup per score. Saved lookup data permits inference
+without retaining individual training rows or refitting isotonic models.
 
 ## Fit Decisions calibration separately
 
@@ -122,47 +273,71 @@ Or use the CLI, which selects `gpt-6-luna` when `--model` is omitted:
 
 ```bash
 typed_evals calibrate examples/assets/labeled.jsonl --backend openai-decisions \
-  --metrics faithfulness answer_relevancy --output openai-calibration.json
+  --metrics faithfulness answer_relevancy --algorithm auto \
+  --isotonic-min-samples 2000 --output openai-calibration.json
 typed_evals evaluate examples/assets/test.jsonl --backend openai-decisions \
   --metrics faithfulness answer_relevancy --calibration openai-calibration.json \
   --threshold 0.9 --output openai-report.json
 ```
 
 This uses the same algorithm and raw-score target as Jev. Decisions Choice/Score
-confidence remains a separate provider value and never enters fitting. A labeled
-refusal or unavailable judgment fails the fit; the previous successful in-memory
-bundle remains intact. Model identity and dataset/group overlap checks continue
+confidence remains a separate provider value and never enters fitting. A
+refusal or unavailable judgment in the configured panel fails the fit; the previous
+successful in-memory bundle remains intact. Model identity and dataset/group overlap checks continue
 to apply.
+
+Use `--algorithm venn_abers` or `--algorithm isotonic` to force an algorithm on
+`calibrate`. `--isotonic-min-samples` changes the cutoff for `--algorithm auto`.
+These options select the fitting algorithm; `evaluate --calibration` uses the
+predictor stored in the artifact.
 
 ## Artifact versions and compatibility
 
-New fits save `schema_version: 2` with explicit `backend_provenance`. Bundled
+New fits save `schema_version: 3` with tagged Venn–Abers or isotonic curves and
+the selected algorithm in each metric's diagnostic report. V1 and v2 isotonic
+artifacts remain readable and retain their original interpolation and endpoint
+behavior; loading does not convert them to Venn–Abers.
+
+V2 and v3 artifacts include explicit `backend_provenance`. Bundled
 backends supply a verified configuration and its SHA-256 fingerprint: provider,
 backend identity, compiler version, score-affecting static configuration, and the
-ordered compiled questions. The fingerprint describes translation rules and
-question configuration, not sample contents. Credentials, timeouts, retries, and
-decision thresholds are excluded. Changing a threshold alone therefore remains
+ordered compiled question templates. Context-relevance target indices and unit
+question names vary with sample content; its metric fingerprint binds the
+versioned recipe for producing those requests. Provenance describes translation
+rules and static question configuration, not sample contents. Credentials, timeouts,
+retries, and decision thresholds are excluded. Changing a threshold alone therefore remains
 compatible; changing provider, compiler, or question translation requires a refit.
-Decisions also binds calibration to its effective endpoint, including an injected
-client's endpoint or `OPENAI_BASE_URL`; credentials in URL userinfo, query, and
-fragment are excluded. Keep any additional caller-controlled routing behavior
-stable when reusing a fitted curve.
+Text-only Jev provenance compiler version `"2"` also binds calibration to the effective SDK
+API root. Owned clients use an explicit `base_url`, then `TYPESAFE_BASE_URL`, then
+the SDK default. Injected clients use their already resolved `_config.base_url`;
+constructor routing and later environment changes do not override that client.
+Decisions likewise records its injected client's endpoint or `OPENAI_BASE_URL`.
+Jev and Decisions normalize host casing, default ports, and trailing slashes while
+preserving meaningful paths and nondefault ports. URL userinfo, query, and
+fragment are excluded to avoid saving credentials. Jev fails clearly if an
+injected client's resolved endpoint cannot be established. Keep any additional
+caller-controlled routing behavior stable when reusing a fitted curve.
+System One records its normalized request endpoint, including any API-root path
+prefix and the appended `/v1/systemone`; its `base_url` rejects URL credentials,
+query strings, and fragments.
 
 Third-party backends implementing only `model` and `session()` remain supported.
 Their new artifacts carry `status: "unknown"`, rather than fabricated provider
 metadata, and retain the existing model, metric, ordering, evidence, and overlap
 checks. Unknown provenance is compatible only with unknown provenance; it cannot
-be transferred to a verified bundled provider. For verified v2 artifacts, direct
+be transferred to a verified bundled provider. For verified v2/v3 artifacts, direct
 `CalibrationBundle.validate_for(...)` callers must also supply current backend
 provenance. Evaluators and pipelines supply it automatically.
 
 V1 artifacts remain readable without rewriting or inventing historical metadata.
-They retain established compatibility with Jev's original compiler (`"1"`) and
-custom backends that expose no provenance capability, subject to all existing
-checks. They cannot prove Decisions compatibility, even if a model ID is edited
-to match. Loading one with Decisions or another provenance-aware backend requires
-a fresh fit from labeled data and gives a clear refit error. There is no bypass
-switch or automatic conversion of an old curve into verified Decisions calibration.
+They retain established compatibility with custom backends that expose no
+provenance capability, subject to all existing checks. They cannot prove bundled
+backend endpoint compatibility, even if a model ID matches. Loading a v1
+artifact with a provenance-aware backend requires a fresh fit from labeled data.
+Older v2/v3 Jev artifacts using compiler version `"1"` also require refitting
+because they did not record an endpoint. Loading or re-saving an old artifact
+never fills in today's endpoint as historical metadata. There is no bypass switch
+or automatic conversion into verified bundled-backend calibration.
 
 ## Image evidence and calibration
 
@@ -180,13 +355,19 @@ evidence duplication, not perceptually similar images, crops, or re-encoded copi
 use `group_id` for related images and versions of the same source document.
 Unselected images do not enter text-only evidence hashes.
 
-Image-selecting metrics use metric fingerprint schema version 3, and Decisions
-records its multimodal compiler configuration for those panels. Existing
-text-only panels retain their established metric fingerprints and Decisions
-compiler identity, so adding image support does not itself invalidate text-only
-artifacts. Changing required fields or provider translation still requires a
-refit. Compiler provenance describes how images are translated, not the image
-data in any particular sample.
+Image-selecting metrics use state-schema marker 3 in their metric fingerprint,
+unless they also select `authorization`, which takes precedence with marker 4.
+Jev, Decisions, and System One record their multimodal compiler configuration for
+those panels; Jev and System One also record `image_mode`. System One uses compiler version
+`images-1` and serialization `json-state+ordered-image-url-parts-v1` for native
+image panels. Refit when changing the model, compiler, or image mode, including
+switching between Jev's `"experimental"` and `"native"` image modes, even when the
+endpoint accepts the same image transport. Existing text-only panels retain
+their established metric fingerprints and compiler identity, so adding image
+support or changing a backend's image mode does not itself invalidate text-only
+artifacts. Changing required
+fields or provider translation still requires a refit. Compiler provenance
+describes how images are translated, not the image data in any particular sample.
 
 Saved calibration artifacts and evaluation reports contain no raw image payloads.
 As with text evidence, selected images are supplied to the judge provider for
@@ -195,37 +376,48 @@ reproduce a fit.
 
 ## The statistical target
 
+For result fields, acceptance thresholds, and the distinction between raw scores,
+provider confidence, and calibrated probabilities, see
+[what the numbers mean](EVALUATION.md#what-the-numbers-mean).
+
 For each metric m, annotate independent samples with y_m ∈ {0, 1}, where 1 means
 the sample satisfies the metric's documented pass definition. Let s_m be its raw
 judge signal. The fitted monotone mapping estimates:
 
 `g_m(s_m) ≈ P(y_m = 1 | s_m)`.
 
-This is event-probability calibration, not top-label judge-accuracy calibration.
+The output estimates a human acceptance event, not top-label judge accuracy.
 For a Noul with raw value 0.1, the input is 0.1, not max(0.1, 0.9) and not 0.8
 “decisiveness.” For Choice, the input is the summed probability of its explicitly
 accepted options. For Score, the input is the expected level divided by the
-maximum level. A Score's target must be defined as a binary human acceptance
-event; it is not fitted against fractional ordinal labels.
+maximum level. For context relevance, the input is the relevant-unit fraction.
+Ordinal scores and relevance fractions are numeric signals, not raw acceptance
+probabilities. Their targets must be defined as binary human acceptance events;
+they are not fitted against fractional ordinal or relevance labels.
 
 ## Algorithm
 
 1. Validate metric label names, evidence, independent groups, and class/sample counts.
 2. Reserve a hold-out or accept an explicitly supplied independent validation set.
 3. Collect raw metric scores without any existing calibrator. Labels never enter state.
-4. Fit `sklearn.isotonic.IsotonicRegression(increasing=True, y_min=0, y_max=1,
-   out_of_bounds="clip")` per metric using only labeled training rows.
+4. Select each metric's algorithm from its labeled training count, or use the
+   configured explicit choice. Fit Venn–Abers or
+   `sklearn.isotonic.IsotonicRegression(increasing=True, y_min=0, y_max=1,
+   out_of_bounds="clip")` using only those training rows.
 5. Evaluate the fitted curves on labeled validation rows. Publish raw/calibrated
    Brier score, log loss, ECE, and reliability bins for each metric.
 6. Atomically replace the in-memory bundle after all metrics succeed. Save it
    explicitly to a versioned JSON artifact for reuse.
-7. For unseen samples, check metric, model, and backend provenance, then interpolate the
-   stored knots and apply each metric's configured threshold.
+7. For unseen samples, check metric, model, and backend provenance, use the saved
+   predictor, and apply each metric's configured threshold.
 
-The stored predictor matches scikit-learn's linear interpolation between learned
-knots, including clipping outside the observed fitting range. No refitting and
-no scikit-learn import occurs during inference. Constant raw scores yield a
-constant training base rate; they cannot gain discrimination through calibration.
+The isotonic predictor matches scikit-learn's linear interpolation between learned
+knots, including clipping outside the observed fitting range. The Venn–Abers
+predictor uses its stored lookup and combines the two hypothetical-label results.
+No refitting and no scikit-learn import occurs during inference. A constant raw
+signal cannot gain discrimination through calibration. With constant training
+scores, isotonic learns the training base rate; Venn–Abers smooths that rate at
+the observed score and can produce a wider pair outside the fitting range.
 
 ## Data separation
 
@@ -243,8 +435,8 @@ semantic duplicates. Keep an additional test set independent if you tune prompts
 select metrics, or repeatedly tune thresholds on the validation report.
 
 All configured metrics are fitted or the fit fails. Sparse labels are supported:
-only rows labeled for a metric enter that metric's fit and diagnostics. Missing
-evidence is allowed only for unlabeled metrics, which are skipped on that row.
+only rows labeled for a metric enter that metric's fit and diagnostics. Every row
+still needs the entire configured panel's evidence, including unlabeled metrics.
 Do not label every sample automatically as “pass”; both classes are required.
 
 ## Diagnostics
@@ -258,9 +450,12 @@ Do not label every sample automatically as “pass”; both classes are required
 
 ECE is bin-dependent and noisy on small samples; it is not a confidence interval.
 The artifact includes bin counts and observed rates so empty/tiny bins are visible.
-Isotonic fitting is monotone but can introduce ties, change threshold decisions,
-and sometimes worsen held-out performance. It cannot repair a fundamentally
-uninformative judge. Calibration on one domain is not a guarantee for another.
+Both calibrators are monotone but can introduce ties, change threshold decisions,
+and worsen held-out performance. Isotonic can output exactly 0 or 1, even with
+2,000 training rows; Venn–Abers point predictions avoid those endpoints but still
+can have worse Brier score or log loss than raw scores. Neither repairs a
+fundamentally uninformative judge. Calibration on one domain is not a guarantee
+for another.
 
 ## Operational contract
 
@@ -269,8 +464,10 @@ ordered metric fingerprints,
 fitting counts, validation metrics, creation time, and hashes of reserved samples
 and declared groups. Fingerprints include wording, criteria, required fields,
 pass options, pass definition, metric version, and the evaluation instruction
-policy. Thresholds are excluded because they change routing, not the raw score
-or the annotation event.
+policy. Context-relevance fingerprints additionally bind aggregation, segmentation
+version, granularity, unit threshold, and bounded request size. Aggregate decision
+thresholds are excluded because they change routing, not the raw score or the
+annotation event. A unit threshold changes the raw fraction and is included.
 
 Refit after model/rubric changes or data-distribution changes. Model/configuration
 changes are detected; distribution drift is not automatically detected. If the

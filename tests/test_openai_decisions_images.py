@@ -119,13 +119,32 @@ async def test_decisions_image_count_boundary_before_any_http_request(size):
 
 
 def test_image_compilation_preserves_input_and_deterministic_text():
-    state = image_sample().state({"input", "response", "images"})
+    sample = image_sample()
+    state = sample.state({"input", "response", "images"})
     snapshot = copy.deepcopy(state)
-    assert compile_input(state) == compile_input(dict(reversed(list(state.items()))))
+    expected = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": (
+                        '{"images":[{"detail":"auto","index":0,"label":"product"}],'
+                        '"input":"Describe the product.","response":"The screen is damaged."}'
+                    ),
+                },
+                {
+                    "type": "input_image",
+                    "image_url": sample.images[0].data_url,
+                    "detail": "auto",
+                },
+            ],
+        }
+    ]
+    assert compile_input(state) == expected
+    assert compile_input(dict(reversed(list(state.items())))) == expected
     assert state == snapshot
-    assert compile_input({"input": "退款", "response": "✓"}) == serialize_state(
-        {"input": "退款", "response": "✓"}
-    )
+    assert compile_input({"input": "退款", "response": "✓"}) == '{"input":"退款","response":"✓"}'
 
 
 async def test_oversized_image_batch_is_preflighted_before_any_request():

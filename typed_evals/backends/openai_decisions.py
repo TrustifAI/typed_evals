@@ -11,18 +11,20 @@ from __future__ import annotations
 import json
 import math
 import os
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 
-from typed_evals.backends.jev import JudgeResponse, JudgeSession, Question
+from typed_evals.backends.base import BaseBackend, JudgeResponse, JudgeSession, Question
 from typed_evals.data.models import ImageInput
 from typed_evals.errors import InvalidAnswerError, OpenAIDecisionsError
 
 if TYPE_CHECKING:
     from openai import AsyncOpenAI
+    from openai.types.decision_create_params import Question as DecisionQuestion
+    from openai.types.decision_input_message_param import DecisionInputMessageParam
 
 DEFAULT_MODEL = "gpt-6-luna"
 # Bump when serialization, question translation, or score interpretation changes.
@@ -38,14 +40,11 @@ def serialize_state(state: dict[str, Any]) -> str:
     )
 
 
-def _validate_images(state: Mapping[str, Any]) -> None:
+def _validate_images(state: Mapping[str, Any]) -> tuple[ImageInput, ...]:
     images = state.get("images")
-    if images is None:
-        return
-    if not isinstance(images, (list, tuple)):
-        raise ValueError("images must be a sequence of ImageInput evidence")
-    if len(images) > MAX_IMAGES:
+    if isinstance(images, (list, tuple)) and len(images) > MAX_IMAGES:
         raise ValueError(f"Decisions accepts at most {MAX_IMAGES} images per request")
+    return BaseBackend.image_inputs(state)
 
 
 def compile_input(state: dict[str, Any]) -> str | list[dict[str, Any]]:
@@ -54,11 +53,9 @@ def compile_input(state: dict[str, Any]) -> str | list[dict[str, Any]]:
     Text-only requests keep their original serialization. The text describes the
     order and labels of attached images, without duplicating image bytes as text.
     """
-    _validate_images(state)
-    images = state.get("images")
+    images = _validate_images(state)
     if not images:
         return serialize_state(state)
-    images = [ImageInput.model_validate(image) for image in images]
     text_state = {
         **state,
         "images": [
@@ -87,18 +84,19 @@ def compile_questions(questions: Mapping[str, Question]) -> list[dict[str, Any]]
             instructions = json.dumps(
                 instructions, ensure_ascii=False, sort_keys=True, allow_nan=False
             )
-        kind = question.type
-        criteria = question.criteria
-        if kind == "noul":
+        if question.type == "noul":
+            predicate_criteria = question.criteria
             instructions += "\nEstimate the probability of the positive (true) condition, which represents a metric pass."
-            if criteria is not None:
-                instructions += "\nTrue condition: " + criteria["true"]
-                instructions += "\nFalse condition: " + criteria["false"]
+            if predicate_criteria is not None:
+                # Metric validates descriptions as strings before creating SDK questions.
+                instructions += "\nTrue condition: " + cast(str, predicate_criteria["true"])
+                instructions += "\nFalse condition: " + cast(str, predicate_criteria["false"])
             compiled.append({"name": name, "type": "predicate", "instructions": instructions})
-        elif kind == "choice":
-            if not isinstance(criteria, dict) or not 2 <= len(criteria) <= 255:
+        elif question.type == "choice":
+            choice_criteria = question.criteria
+            if not isinstance(choice_criteria, dict) or not 2 <= len(choice_criteria) <= 255:
                 raise ValueError("Decisions Choice requires between 2 and 255 options")
-            if any(not isinstance(value, str) for value in criteria):
+            if any(not isinstance(value, str) for value in choice_criteria):
                 raise ValueError("Typed Evals Choice option values must be strings")
             compiled.append(
                 {
@@ -106,13 +104,14 @@ def compile_questions(questions: Mapping[str, Question]) -> list[dict[str, Any]]
                     "type": "choice",
                     "instructions": instructions,
                     "choices": [
-                        {"value": value, "description": criteria[value]}
-                        for value in sorted(criteria)
+                        {"value": value, "description": choice_criteria[value]}
+                        for value in sorted(choice_criteria)
                     ],
                 }
             )
-        elif kind == "score":
-            if not isinstance(criteria, (list, tuple)) or not 2 <= len(criteria) <= 10:
+        elif question.type == "score":
+            score_criteria = question.criteria
+            if not isinstance(score_criteria, (list, tuple)) or not 2 <= len(score_criteria) <= 10:
                 raise ValueError("Typed Evals Score requires 2–10 ordered levels")
             compiled.append(
                 {
@@ -121,7 +120,7 @@ def compile_questions(questions: Mapping[str, Question]) -> list[dict[str, Any]]
                     "instructions": instructions,
                     "levels": [
                         {"label": str(index), "description": description}
-                        for index, description in enumerate(criteria)
+                        for index, description in enumerate(score_criteria)
                     ],
                 }
             )
@@ -200,7 +199,10 @@ def normalize_answer(answer: dict[str, Any], question: dict[str, Any]) -> dict[s
         }
     value = answer.get("score")
     levels = len(question["levels"]) - 1
-    if type(value) not in (int, float) or not 0 <= value <= levels:
+    if type(value) not in (int, float):
+        raise InvalidAnswerError("Invalid Decisions expected ordinal score")
+    value = cast(int | float, value)
+    if not 0 <= value <= levels:
         raise InvalidAnswerError("Invalid Decisions expected ordinal score")
     expected = sum(int(index) * probability for index, probability in probabilities.items())
     if abs(value - expected) > 0.01 + 0.005 * sum(range(levels + 1)):
@@ -231,7 +233,8 @@ def normalize_answers(
         associated[name] = answer
     if set(associated) != set(expected):
         raise InvalidAnswerError("Decisions omitted requested question names")
-    normalized, errors = {}, {}
+    normalized: dict[str, dict[str, Any]] = {}
+    errors: dict[str, Literal["invalid_answer", "refusal"]] = {}
     for name, question in expected.items():
         answer = associated[name]
         if answer.get("type") == "refusal":
@@ -291,7 +294,11 @@ class _DecisionsSession:
         compiled = compile_questions(questions)
         try:
             raw = await self.client.decisions.with_raw_response.create(
-                model=self.model, input=compile_input(state), questions=compiled
+                # The compiler constructs these wire shapes; the neutral dictionaries
+                # remain useful for validation and provenance without SDK imports.
+                model=self.model,
+                input=cast("str | list[DecisionInputMessageParam]", compile_input(state)),
+                questions=cast("list[DecisionQuestion]", compiled),
             )
         except OpenAIError as exc:
             # SDK errors can echo credentials/evidence. Export only the error
@@ -319,7 +326,7 @@ class _DecisionsSession:
 
 
 @dataclass
-class OpenAIDecisionsBackend:
+class OpenAIDecisionsBackend(BaseBackend):
     """Use the optional OpenAI SDK. Injected async clients remain caller-owned."""
 
     supported_modalities: ClassVar[frozenset[str]] = frozenset({"text", "image"})
@@ -334,26 +341,10 @@ class OpenAIDecisionsBackend:
         """Preflight provider limits for the whole batch before any request."""
         _validate_images(state)
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.model, str) or not self.model.strip():
-            raise ValueError("model must be a nonempty identifier")
-        try:
-            valid_timeout = (
-                type(self.timeout) in (int, float)
-                and math.isfinite(self.timeout)
-                and self.timeout > 0
-            )
-        except OverflowError:
-            valid_timeout = False
-        if not valid_timeout:
-            raise ValueError("timeout must be positive and finite")
-        if type(self.max_retries) is not int or self.max_retries < 0:
-            raise ValueError("max_retries must be a nonnegative integer")
-
     def calibration_provenance(self, questions: Mapping[str, Question]) -> dict[str, Any]:
         image_input = any(
             isinstance(question.instructions, Mapping)
-            and "image" in question.instructions.get("required_modalities", ())
+            and "image" in cast(Sequence[str], question.instructions.get("required_modalities", ()))
             for question in questions.values()
         )
         # A custom route can return the same model string. Bind curves to the

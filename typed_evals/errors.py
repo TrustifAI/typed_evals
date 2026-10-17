@@ -1,4 +1,4 @@
-"""Public errors; native Decisions transport messages withhold provider contents."""
+"""Public errors; transport messages withhold provider contents."""
 
 
 class TypedEvalsError(Exception):
@@ -23,6 +23,10 @@ class DecisionRefusalError(InvalidAnswerError):
 
 class OpenAIDecisionsError(TypedEvalsError):
     """A Decisions transport failure, with provider response contents withheld."""
+
+
+class SystemOneError(TypedEvalsError):
+    """A System One transport failure, with provider response contents withheld."""
 
 
 class CalibrationError(TypedEvalsError, ValueError):

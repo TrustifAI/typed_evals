@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable, Sequence
 from functools import wraps
-from typing import Any
+from typing import Any, TypedDict
 
 from typed_evals.data.models import EvaluationSample
 from typed_evals.runtime.guards import RuntimeGuard, _async_callable, guarded_by
@@ -24,6 +24,13 @@ _ENTRYPOINTS = (
 _STREAMING = frozenset(
     {"stream", "astream", "run_stream", "run_stream_sync", "astream_events", "invoke_stream"}
 )
+
+
+class _GuardOptions(TypedDict):
+    before: str | None
+    after: str | None
+    before_sample: Callable[[tuple, dict], EvaluationSample] | None
+    after_sample: Callable[[Any, tuple, dict], EvaluationSample] | None
 
 
 class GuardedAgent:
@@ -80,9 +87,12 @@ def guarded_agent(
     async_methods marks regular methods returning awaitables, e.g. Agent.run in some SDKs.
     Classes and factory=True functions construct GuardedAgent proxies without judging init.
     """
-    options = dict(
-        before=before, after=after, before_sample=before_sample, after_sample=after_sample
-    )
+    options: _GuardOptions = {
+        "before": before,
+        "after": after,
+        "before_sample": before_sample,
+        "after_sample": after_sample,
+    }
     # Validate policy names and builders before constructing or calling anything.
     wrap_default = guarded_by(guard, **options)
     selected = None if methods is None else _method_names(methods, "methods")
