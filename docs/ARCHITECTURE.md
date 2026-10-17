@@ -81,7 +81,9 @@ The base declares `model: str` and an abstract `session()`, an asynchronous cont
 manager yielding a `JudgeSession`. The session implements:
 
 ```python
-async def judge(self, state: dict[str, Any], questions: Mapping[str, Question]) -> JudgeResponse: ...
+async def judge(
+    self, state: dict[str, Any], questions: Mapping[str, Question]
+) -> JudgeResponse: ...
 ```
 
 `Question` is a TypeSafe SDK Noul, Choice, or Score object. `JudgeResponse`

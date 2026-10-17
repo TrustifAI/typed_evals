@@ -813,17 +813,16 @@ measurement; the library does not extract claims automatically.
 from typed_evals import ContextRelevance, EvaluationSample, Evaluator
 
 metric = ContextRelevance(
-    threshold=0.8,            # Aggregate acceptance threshold.
+    threshold=0.8,  # Aggregate acceptance threshold.
     granularity="sentence",  # Default; "passage" gives a coarser fraction.
-    unit_threshold=0.5,       # A unit is relevant when its P(true) >= this value.
-    questions_per_call=32,    # Maximum unit questions in one request; range 1–128.
+    unit_threshold=0.5,  # A unit is relevant when its P(true) >= this value.
+    questions_per_call=32,  # Maximum unit questions in one request; range 1–128.
 )
 sample = EvaluationSample(
     input="What is the refund period?",
     response="",  # Required sample field; excluded from unit judge requests.
-    contexts=["Refunds are allowed within 30 days of purchase."] + [
-        f"Product {index} comes in blue and green." for index in range(1, 10)
-    ],
+    contexts=["Refunds are allowed within 30 days of purchase."]
+    + [f"Product {index} comes in blue and green." for index in range(1, 10)],
 )
 result = Evaluator([metric]).evaluate_one(sample)
 relevance = result.metrics["context_relevance"]

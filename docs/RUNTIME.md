@@ -605,9 +605,7 @@ from typed_evals import guarded_by, ToolProposal
             name="read_ticket",
             arguments={"ticket_id": kwargs["ticket_id"] if "ticket_id" in kwargs else args[0]},
         ),
-        contexts=(
-            "read_ticket(ticket_id: str) reads a ticket without modifying it.",
-        ),
+        contexts=("read_ticket(ticket_id: str) reads a ticket without modifying it.",),
         authorization=("The authenticated customer Alice is authorized to read T-42 only.",),
     ),
     native_output=True,
