@@ -341,15 +341,36 @@ def test_choice_count_constraints(size):
             compile_questions({metric.name: metric.question()})
 
 
-def test_serialization_and_question_order_are_deterministic():
-    assert serialize_state({"response": "✓", "input": "退款"}) == serialize_state(
-        {"input": "退款", "response": "✓"}
+def test_serialization_preserves_nested_unicode_evidence_with_canonical_key_order():
+    state = {
+        "response": "✓",
+        "input": "退款",
+        "proposed_tool_call": {"name": "lookup", "arguments": {"z": [2, 1], "a": "商品"}},
+    }
+    expected = (
+        '{"input":"退款","proposed_tool_call":'
+        '{"arguments":{"a":"商品","z":[2,1]},"name":"lookup"},"response":"✓"}'
     )
+    assert serialize_state(state) == expected
+    assert serialize_state(dict(reversed(list(state.items())))) == expected
+    assert json.loads(expected) == state
+
+
+def test_choice_compilation_sorts_options_without_losing_their_descriptions():
     metric = panel()[1]
     other = metric.model_copy(update={"criteria": dict(reversed(list(metric.criteria.items())))})
-    assert compile_questions({metric.name: metric.question()}) == compile_questions(
-        {other.name: other.question()}
-    )
+    expected = [
+        {"value": "fail", "description": "Unacceptable"},
+        {"value": "pass_a", "description": "First acceptable"},
+        {"value": "pass_b", "description": "Second acceptable"},
+    ]
+    for configured in (metric, other):
+        question = compile_questions({configured.name: configured.question()})[0]
+        assert question["name"] == "category"
+        assert question["type"] == "choice"
+        assert question["choices"] == expected
+        assert "Select category" in question["instructions"]
+        assert EVALUATION_POLICY in question["instructions"]
 
 
 @pytest.mark.parametrize(

@@ -64,7 +64,8 @@ executed = []
         proposed_tool_call=ToolProposal(
             name="read_ticket", arguments={"ticket_id": kwargs["ticket_id"]}
         ),
-        contexts=("read_ticket(ticket_id: str) reads a ticket. The user can read T-42 only.",),
+        contexts=("read_ticket(ticket_id: str) reads a ticket.",),
+        authorization=("The user can read T-42 only.",),
     ),
 )
 async def read_ticket(ticket_id: str) -> dict:

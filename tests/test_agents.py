@@ -245,23 +245,48 @@ async def test_concurrent_agents_and_parallel_tools_have_isolated_metadata():
         assert all(d.evaluation.sample_hash == expected_hash for d in result.decisions[:2])
 
 
-async def test_cancellation_resets_decision_scope():
+async def test_cancelled_child_keeps_its_audit_and_restores_parent_decision_scope():
     guard, _ = make_guard()
     entered = asyncio.Event()
 
-    @guarded_agent(guard, before="before", before_sample=before_sample)
-    async def agent(question):
+    @guarded_agent(
+        guard,
+        before="before",
+        before_sample=before_sample,
+        after="response",
+        after_sample=after_sample,
+    )
+    async def child(question):
         if question == "wait":
             entered.set()
             await asyncio.Event().wait()
         return {"answer": "Paris"}
 
-    pending = asyncio.create_task(agent("wait"))
-    await entered.wait()
-    pending.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await pending
-    assert len((await agent("new")).decisions) == 1
+    @guarded_agent(guard, after="response", after_sample=after_sample)
+    async def parent(question):
+        pending = asyncio.create_task(child("wait"))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        recovered = await child("new")
+        assert [d.checkpoint for d in recovered.decisions] == ["before", "response"]
+        return recovered.output
+
+    result = await parent("outer")
+    assert result.output == {"answer": "Paris"}
+    assert [d.checkpoint for d in result.decisions] == ["before", "before", "response", "response"]
+    expected_samples = [
+        before_sample(("wait",), {}),
+        before_sample(("new",), {}),
+        after_sample(result.output, ("new",), {}),
+        after_sample(result.output, ("outer",), {}),
+    ]
+    assert [d.evaluation.sample_hash for d in result.decisions] == [
+        sample.content_hash for sample in expected_samples
+    ]
+    assert len({d.id for d in result.decisions}) == 4
+    assert len((await child("independent")).decisions) == 2
 
 
 def test_unselected_known_entrypoints_and_streaming_cannot_bypass_proxy():

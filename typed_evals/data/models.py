@@ -115,10 +115,13 @@ class ToolProposal(Model):
 class EvaluationSample(Model):
     input: Annotated[StrictStr, Field(min_length=1)]
     response: StrictStr
-    contexts: tuple[StrictStr, ...] = ()
+    contexts: tuple[StrictStr, ...] | None = None
+    # Supplied by the application from authenticated state, never copied from
+    # retrieved passages, user claims, or model-generated tool arguments.
+    authorization: tuple[StrictStr, ...] = ()
     images: tuple[ImageInput, ...] = ()
     reference: StrictStr | None = None
-    trace: tuple[ToolCall, ...] = ()
+    trace: tuple[ToolCall, ...] | None = None
     expected_outcome: StrictStr | None = None
     proposed_tool_call: ToolProposal | None = None
     id: StrictStr | None = None
@@ -132,11 +135,11 @@ class EvaluationSample(Model):
             raise ValueError("input must contain text")
         return value
 
-    @field_validator("contexts")
+    @field_validator("contexts", "authorization")
     @classmethod
-    def nonblank_contexts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if any(not item.strip() for item in value):
-            raise ValueError("contexts must not contain blank passages")
+    def nonblank_contexts(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        if value is not None and any(not item.strip() for item in value):
+            raise ValueError("evidence must not contain blank strings")
         return value
 
     def state(self, fields: tuple[str, ...] | set[str]) -> dict[str, Any]:
@@ -146,13 +149,22 @@ class EvaluationSample(Model):
     def content_hash(self) -> str:
         # IDs, grouping and metadata are never evidence for a metric.
         excluded = {"id", "group_id", "metadata"}
+        if not self.authorization:
+            # Preserve content identities for existing samples without permission evidence.
+            excluded.add("authorization")
         if not self.images:
             # Keep text-only sample identities compatible with existing calibration data.
             excluded.add("images")
         if self.proposed_tool_call is None:
             # Preserve identities of existing offline samples and calibration data.
             excluded.add("proposed_tool_call")
-        return digest(self.model_dump(mode="json", exclude=excluded))
+        content = self.model_dump(mode="json", exclude=excluded)
+        # Preserve pre-existing content identities for samples without evidence.
+        # Selected-state calibration hashes still distinguish missing from known-empty.
+        for field in ("contexts", "trace"):
+            if content[field] is None:
+                content[field] = []
+        return digest(content)
 
     @property
     def group_hash(self) -> str | None:
@@ -174,12 +186,39 @@ class CalibrationExample(Model):
         return {key: int(label) for key, label in value.items()}
 
 
+class ContextUnitResult(Model):
+    """One judged source span; reports retain addresses, never raw source text."""
+
+    passage_index: Annotated[int, Field(ge=0)]
+    unit_index: Annotated[int, Field(ge=0)]
+    start: Annotated[int, Field(ge=0)]
+    end: Annotated[int, Field(ge=0)]
+    status: Literal["ok", "error"]
+    probability: Probability | None = None
+    relevant: bool | None = None
+    error_type: str | None = None
+
+
+class ContextRelevanceDetails(Model):
+    granularity: Literal["sentence", "passage"]
+    segmentation_version: str
+    unit_threshold: Probability
+    total_units: Annotated[int, Field(ge=0)]
+    evaluated_units: Annotated[int, Field(ge=0)]
+    relevant_units: Annotated[int, Field(ge=0)]
+    unavailable_units: Annotated[int, Field(ge=0)]
+    coverage: Probability | None
+    units: tuple[ContextUnitResult, ...] = ()
+
+
 class MetricResult(Model):
     name: str
     status: Literal["ok", "skipped", "error"]
     raw_score: Probability | None = None
     calibrated_probability: Probability | None = None
-    raw_kind: Literal["event_probability", "normalized_ordinal_score"] | None = None
+    raw_kind: (
+        Literal["event_probability", "normalized_ordinal_score", "relevance_fraction"] | None
+    ) = None
     threshold: Probability
     passed: bool | None = None
     confidence: Probability | None = None
@@ -187,6 +226,7 @@ class MetricResult(Model):
     selected_choice: str | None = None
     calibration_target: Literal["metric_pass"] | None = None
     message: str | None = None
+    details: ContextRelevanceDetails | None = None
 
     @property
     def score(self) -> float | None:

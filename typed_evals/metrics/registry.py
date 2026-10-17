@@ -1,12 +1,21 @@
 from .agents import PolicyCompliance, TaskCompletion, ToolAccuracy, ToolGrounding, ToolSafety
-from .rag import AnswerCorrectness, AnswerRelevancy, ContextRelevance, Faithfulness
+from .rag import (
+    AnswerCompleteness,
+    AnswerCorrectness,
+    AnswerRelevancy,
+    ContextRelevance,
+    ContextSufficiency,
+    Faithfulness,
+)
 
 # Metrics constructible with defaults, also used by the CLI.
 BUILTIN_METRICS = {
     "faithfulness": Faithfulness,
     "answer_relevancy": AnswerRelevancy,
+    "answer_completeness": AnswerCompleteness,
     "answer_correctness": AnswerCorrectness,
     "context_relevance": ContextRelevance,
+    "context_sufficiency": ContextSufficiency,
     "task_completion": TaskCompletion,
     "tool_grounding": ToolGrounding,
     "tool_accuracy": ToolAccuracy,

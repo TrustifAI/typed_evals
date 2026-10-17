@@ -8,6 +8,7 @@ from typed_evals import (
     AnswerRelevancy,
     EvaluationPipeline,
     EvaluationReport,
+    EvaluationSample,
     Evaluator,
     Faithfulness,
     SampleResult,
@@ -23,6 +24,11 @@ async def test_convenience_inputs_preserve_results_and_batch_shape(
     sample, backend, tmp_path, form, asynchronous
 ):
     data = sample.model_dump(mode="json")
+    second = sample.model_copy(update={"id": "second", "input": "Different Q", "response": "Wrong"})
+    backend.answer = lambda state, questions: {
+        name: {"type": "noul", "noul": 0.2 if state["input"] == "Different Q" else 0.8}
+        for name in questions
+    }
     args, kwargs = (), {"backend": backend, "preset": "rag"}
     if form == "fields":
         kwargs.update(data)
@@ -31,7 +37,14 @@ async def test_convenience_inputs_preserve_results_and_batch_shape(
         path.write_text(json.dumps([data] if form == "json" else data))
         args = (path if form == "json" else str(path),)
     else:
-        args = ({"sample": sample, "dict": data, "batch": [data], "mixed": [sample, data]}[form],)
+        args = (
+            {
+                "sample": sample,
+                "dict": data,
+                "batch": [data],
+                "mixed": [sample, second.model_dump(mode="json")],
+            }[form],
+        )
     result = await aevaluate(*args, **kwargs) if asynchronous else evaluate(*args, **kwargs)
     if form in ("fields", "sample", "dict"):
         assert isinstance(result, SampleResult)
@@ -39,14 +52,28 @@ async def test_convenience_inputs_preserve_results_and_batch_shape(
     else:
         assert isinstance(result, EvaluationReport)
         results = result.results
-    assert len(results) == (2 if form == "mixed" else 1)
-    assert all(row.passed and row.sample_id == sample.id for row in results)
+    expected = [(sample.id, True, 0.8)]
+    if form == "mixed":
+        expected.append(("second", False, 0.2))
+    assert [
+        (row.sample_id, row.passed, row.metrics["answer_relevancy"].raw_score) for row in results
+    ] == expected
     assert all(
-        set(row.metrics) == {"faithfulness", "answer_relevancy", "context_relevance"}
+        set(row.metrics)
+        == {
+            "faithfulness",
+            "answer_relevancy",
+            "answer_completeness",
+            "context_relevance",
+            "context_sufficiency",
+        }
         for row in results
     )
     assert backend.sessions == backend.closed == 1
-    assert len(backend.calls) == len(results)
+    assert len(backend.calls) == 2 * len(results)
+    assert [state["response"] for state, _ in backend.calls if "response" in state] == (
+        [sample.response, "Wrong"] if form == "mixed" else [sample.response]
+    )
 
 
 def test_existing_positional_metrics_and_empty_batch_are_compatible(sample, backend):
@@ -114,21 +141,66 @@ async def test_relevant_but_unsupported_answer_warns_and_needs_grounding_check(
 
 
 @pytest.mark.parametrize(
-    "preset,names",
+    "preset,names,fields",
     [
-        ("response", ["answer_relevancy"]),
-        ("rag", ["faithfulness", "answer_relevancy", "context_relevance"]),
-        ("agent", ["task_completion", "tool_grounding"]),
+        ("response", ["answer_relevancy", "answer_completeness"], {"input", "response"}),
+        (
+            "rag",
+            [
+                "faithfulness",
+                "answer_relevancy",
+                "answer_completeness",
+                "context_relevance",
+                "context_sufficiency",
+            ],
+            {"input", "response", "contexts"},
+        ),
+        (
+            "agent",
+            ["task_completion", "tool_grounding", "answer_relevancy", "answer_completeness"],
+            {"input", "response", "trace", "expected_outcome"},
+        ),
     ],
 )
-def test_presets_work_in_reusable_evaluators_and_pipelines(preset, names, backend):
-    evaluator = Evaluator(preset=preset, backend=backend)
-    pipeline = EvaluationPipeline(preset=preset, backend=backend)
-    assert [metric.name for metric in evaluator.metrics] == names
-    assert evaluator.metrics == pipeline.evaluator.metrics
-    assert all(
-        a is not b for a, b in zip(evaluator.metrics, pipeline.evaluator.metrics, strict=True)
+@pytest.mark.parametrize("evaluator_type", [Evaluator, EvaluationPipeline])
+def test_presets_evaluate_the_selected_checks_using_only_their_evidence(
+    preset, names, fields, evaluator_type, backend
+):
+    sample = EvaluationSample(
+        input="Look up order 42",
+        response="The order was delivered.",
+        contexts=("Delivery records",) if preset == "rag" else (),
+        trace=({"name": "lookup", "arguments": {"id": 42}, "output": "Delivered"},),
+        expected_outcome="Find the delivery status",
+        reference="private reference unused by these panels",
+        metadata={"label": "private label"},
     )
+    scores = {name: index / len(names) for index, name in enumerate(names, 1)}
+    backend.answer = lambda state, questions: {
+        name: {
+            "type": "noul",
+            "noul": scores["context_relevance"]
+            if "target_context_index" in question.instructions
+            else scores[name],
+        }
+        for name, question in questions.items()
+    }
+    result = evaluator_type(preset=preset, backend=backend).evaluate_one(sample)
+
+    assert list(result.metrics) == names
+    expected_scores = dict(scores)
+    if preset == "rag":
+        expected_scores["context_relevance"] = float(scores["context_relevance"] >= 0.5)
+    assert {name: metric.raw_score for name, metric in result.metrics.items()} == expected_scores
+    assert result.passed is (min(scores.values()) >= 0.5)
+    assert len(backend.calls) == (2 if preset == "rag" else 1)
+    state, questions = backend.calls[0]
+    assert set(state) == fields
+    assert list(questions) == [name for name in names if name != "context_relevance"]
+    if preset == "agent":
+        assert state["trace"][0]["output"] == "Delivered"
+        assert state["expected_outcome"] == "Find the delivery status"
+    assert backend.sessions == backend.closed == 1
 
 
 @pytest.mark.parametrize(

@@ -49,6 +49,26 @@ class ReliabilityBin(Model):
     observed_positive_rate: Probability | None
 
 
+class ThresholdDiagnostics(Model):
+    """Held-out pass/fail performance at one explicit decision threshold.
+
+    False acceptance is FP / (FP + TN); false rejection is FN / (FN + TP).
+    Rates with a zero denominator are unavailable rather than reported as zero.
+    """
+
+    threshold: Probability
+    true_positives: Annotated[int, Field(ge=0, strict=True)]
+    true_negatives: Annotated[int, Field(ge=0, strict=True)]
+    false_positives: Annotated[int, Field(ge=0, strict=True)]
+    false_negatives: Annotated[int, Field(ge=0, strict=True)]
+    accuracy: Probability
+    false_acceptance_rate: Probability | None
+    false_rejection_rate: Probability | None
+    precision: Probability | None
+    recall: Probability | None
+    balanced_accuracy: Probability | None
+
+
 class ProbabilityDiagnostics(Model):
     count: int
     brier: float
@@ -56,14 +76,40 @@ class ProbabilityDiagnostics(Model):
     ece: float
     accuracy_at_half: Probability
     bins: tuple[ReliabilityBin, ...]
+    # Historical artifacts did not retain predictions or the configured threshold.
+    at_threshold: ThresholdDiagnostics | None = None
 
 
 def probability_diagnostics(
-    predictions: Sequence[float], labels: Sequence[int], *, n_bins: int = 10
+    predictions: Sequence[float],
+    labels: Sequence[int],
+    *,
+    n_bins: int = 10,
+    threshold: float = 0.5,
 ) -> ProbabilityDiagnostics:
     if type(n_bins) is not int or not 2 <= n_bins <= 100:
         raise CalibrationError("n_bins must be between 2 and 100")
     _validate_xy(predictions, labels)
+    if (
+        isinstance(threshold, bool)
+        or not isinstance(threshold, Real)
+        or not 0 <= threshold <= 1
+        or not math.isfinite(threshold)
+    ):
+        raise CalibrationError("threshold must be finite and in [0, 1]")
+    tp = tn = fp = fn = 0
+    for prediction, label in zip(predictions, labels, strict=True):
+        if prediction >= threshold:
+            if label:
+                tp += 1
+            else:
+                fp += 1
+        elif label:
+            fn += 1
+        else:
+            tn += 1
+    recall = tp / (tp + fn) if tp + fn else None
+    specificity = tn / (tn + fp) if tn + fp else None
     bins = []
     ece = 0.0
     for index in range(n_bins):
@@ -106,6 +152,21 @@ def probability_diagnostics(
         )
         / len(labels),
         bins=tuple(bins),
+        at_threshold=ThresholdDiagnostics(
+            threshold=threshold,
+            true_positives=tp,
+            true_negatives=tn,
+            false_positives=fp,
+            false_negatives=fn,
+            accuracy=(tp + tn) / len(labels),
+            false_acceptance_rate=fp / (fp + tn) if fp + tn else None,
+            false_rejection_rate=fn / (fn + tp) if fn + tp else None,
+            precision=tp / (tp + fp) if tp + fp else None,
+            recall=recall,
+            balanced_accuracy=(recall + specificity) / 2
+            if recall is not None and specificity is not None
+            else None,
+        ),
     )
 
 
@@ -115,8 +176,8 @@ def _validate_xy(scores: Sequence[float], labels: Sequence[int]) -> None:
     if any(
         isinstance(value, bool)
         or not isinstance(value, Real)
-        or not math.isfinite(value)
         or not 0 <= value <= 1
+        or not math.isfinite(value)
         for value in scores
     ):
         raise CalibrationError("raw scores must be finite values in [0, 1]")
@@ -128,8 +189,8 @@ def _validate_score(score: float) -> None:
     if (
         isinstance(score, bool)
         or not isinstance(score, Real)
-        or not math.isfinite(score)
         or not 0 <= score <= 1
+        or not math.isfinite(score)
     ):
         raise CalibrationError("raw score must be finite and in [0, 1]")
 
@@ -303,6 +364,10 @@ CalibrationCurve = Annotated[
 
 class MetricCalibrationReport(Model):
     algorithm: Literal["isotonic", "venn_abers"] = "isotonic"
+    # Older reports did not record score semantics; do not invent them on load.
+    raw_kind: (
+        Literal["event_probability", "normalized_ordinal_score", "relevance_fraction"] | None
+    ) = None
     training_samples: int
     validation_samples: int
     training_positive_rate: Probability
@@ -310,6 +375,8 @@ class MetricCalibrationReport(Model):
     calibrated: ProbabilityDiagnostics
     brier_improved: bool
     log_loss_improved: bool = False
+    # Holdout loss from always predicting the training positive rate; no holdout leakage.
+    constant_prior_brier: float | None = None
     notes: tuple[str, ...] = ()
 
     @model_validator(mode="before")
@@ -366,7 +433,11 @@ class CalibrationBundle(Model):
                 curve.pop("algorithm", None)
             for report in value.get("report", {}).get("metrics", {}).values():
                 report.pop("algorithm", None)
+                report.pop("raw_kind", None)
                 report.pop("log_loss_improved", None)
+                report.pop("constant_prior_brier", None)
+                for diagnostics in (report.get("raw", {}), report.get("calibrated", {})):
+                    diagnostics.pop("at_threshold", None)
         return value
 
     @model_validator(mode="before")
@@ -448,14 +519,9 @@ class CalibrationBundle(Model):
     def _validate_backend(self, provenance: dict[str, Any]) -> None:
         validate_provenance(provenance)
         if self.schema_version == 1:
-            configuration = provenance.get("configuration", {})
-            if provenance["status"] == "unknown" or (
-                configuration.get("provider") == "typesafe"
-                and configuration.get("backend") == "jev"
-                and configuration.get("compiler_version") == "1"
-            ):
-                # Established v1 Jev and model/session-only custom workflows remain usable.
-                # This compatibility rule asserts no historical provider/compiler identity.
+            if provenance["status"] == "unknown":
+                # Preserve model/session-only custom workflows without asserting a
+                # historical endpoint for provenance-aware bundled backends.
                 return
             raise CalibrationMismatchError(
                 "Legacy calibration has no backend/compiler provenance; refit with this backend"

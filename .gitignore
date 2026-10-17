@@ -15,4 +15,5 @@ dist/
 *.xml
 .vscode/
 .deepeval/
+benchmark_runs/
 typed-evals-benchmark/

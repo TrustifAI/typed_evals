@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 from urllib.parse import urlsplit, urlunsplit
 
-from typed_evals.backends.jev import JudgeResponse, JudgeSession, Question
+from typed_evals.backends.base import BaseBackend, JudgeResponse, JudgeSession, Question
 from typed_evals.data.models import ImageInput
 from typed_evals.errors import InvalidAnswerError, OpenAIDecisionsError
 
@@ -40,14 +40,11 @@ def serialize_state(state: dict[str, Any]) -> str:
     )
 
 
-def _validate_images(state: Mapping[str, Any]) -> None:
+def _validate_images(state: Mapping[str, Any]) -> tuple[ImageInput, ...]:
     images = state.get("images")
-    if images is None:
-        return
-    if not isinstance(images, (list, tuple)):
-        raise ValueError("images must be a sequence of ImageInput evidence")
-    if len(images) > MAX_IMAGES:
+    if isinstance(images, (list, tuple)) and len(images) > MAX_IMAGES:
         raise ValueError(f"Decisions accepts at most {MAX_IMAGES} images per request")
+    return BaseBackend.image_inputs(state)
 
 
 def compile_input(state: dict[str, Any]) -> str | list[dict[str, Any]]:
@@ -56,11 +53,9 @@ def compile_input(state: dict[str, Any]) -> str | list[dict[str, Any]]:
     Text-only requests keep their original serialization. The text describes the
     order and labels of attached images, without duplicating image bytes as text.
     """
-    _validate_images(state)
-    images = state.get("images")
+    images = _validate_images(state)
     if not images:
         return serialize_state(state)
-    images = [ImageInput.model_validate(image) for image in images]
     text_state = {
         **state,
         "images": [
@@ -331,7 +326,7 @@ class _DecisionsSession:
 
 
 @dataclass
-class OpenAIDecisionsBackend:
+class OpenAIDecisionsBackend(BaseBackend):
     """Use the optional OpenAI SDK. Injected async clients remain caller-owned."""
 
     supported_modalities: ClassVar[frozenset[str]] = frozenset({"text", "image"})
@@ -345,22 +340,6 @@ class OpenAIDecisionsBackend:
     def validate_state(self, state: Mapping[str, Any]) -> None:
         """Preflight provider limits for the whole batch before any request."""
         _validate_images(state)
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.model, str) or not self.model.strip():
-            raise ValueError("model must be a nonempty identifier")
-        try:
-            valid_timeout = (
-                type(self.timeout) in (int, float)
-                and math.isfinite(self.timeout)
-                and self.timeout > 0
-            )
-        except OverflowError:
-            valid_timeout = False
-        if not valid_timeout:
-            raise ValueError("timeout must be positive and finite")
-        if type(self.max_retries) is not int or self.max_retries < 0:
-            raise ValueError("max_retries must be a nonnegative integer")
 
     def calibration_provenance(self, questions: Mapping[str, Question]) -> dict[str, Any]:
         image_input = any(

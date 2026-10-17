@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="https://pypi.org/project/typed-evals/"><img src="https://img.shields.io/pypi/v/typed-evals?style=flat-square&amp;color=0f766e" alt="PyPI version"></a>
-  <a href="https://pypi.org/project/typed-evals/"><img src="https://img.shields.io/badge/python-3.11%2B-2563eb?style=flat-square" alt="Python 3.11 and later"></a>
+  <a href="https://pypi.org/project/typed-evals/"><img src="https://img.shields.io/badge/python-3.12%2B-2563eb?style=flat-square" alt="Python 3.12 and later"></a>
   <a href="https://github.com/TrustifAI/typed_evals/actions/workflows/test.yml"><img src="https://github.com/TrustifAI/typed_evals/actions/workflows/test.yml/badge.svg?branch=main" alt="Tests"></a>
   <a href="https://github.com/TrustifAI/typed_evals/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-64748b?style=flat-square" alt="MIT license"></a>
 </p>
@@ -30,11 +30,11 @@ evaluate recorded agent runs and apply policy checks before tools execute.
 
 ## Quickstart
 
-Requires **Python 3.11+**. The default [Jev](https://typesafe.ai/) backend uses a
+Requires **Python >= 3.12**. The default [Jev](https://typesafe.ai/) backend uses a
 TypeSafe API key; other providers are listed [below](#choose-a-backend).
 
 ```bash
-python -m pip install typed-evals
+pip install typed-evals
 export TYPESAFE_API_KEY='your-key'
 ```
 
@@ -56,12 +56,15 @@ for name, metric in result.metrics.items():
 ```
 
 The RAG preset checks whether the answer is supported by the context
-(**faithfulness**), addresses the question (**answer relevancy**), and has at least
-one useful context passage (**context relevance**). All three share one judge
-request. `passed=True` means all selected checks met their thresholds. Judge
+(**faithfulness**), addresses the question (**answer relevancy**), covers every
+essential requested part (**answer completeness**), retrieves an acceptable
+fraction of useful source units (**context relevance**), and has evidence for the
+entire question (**context sufficiency**). The other four checks share one judge
+request; context relevance judges source units in separate bounded requests.
+`passed=True` means all selected checks met their thresholds. Judge
 results can be wrong; validate them against examples from your application.
 
-This example makes an API call using your account. To explore without a key,
+This example makes API calls using your account. To explore without a key,
 start with the [offline demo](#try-it-offline).
 
 ## Choose your checks
@@ -70,9 +73,12 @@ A preset selects the metrics and the evidence they need:
 
 | Preset | Checks | Evidence to supply |
 | --- | --- | --- |
-| `"response"` · default | Answer relevancy | `input`, `response` |
-| `"rag"` | Faithfulness, answer relevancy, context relevance | `input`, `response`, `contexts` |
-| `"agent"` | Task completion, tool grounding | `input`, `response`, `trace`, `expected_outcome` |
+| `"response"` | Answer relevancy, answer completeness | `input`, `response` |
+| `"rag"` | Faithfulness, answer relevancy, answer completeness, context relevance, context sufficiency | `input`, `response`, `contexts` |
+| `"agent"` | Task completion, tool grounding, answer relevancy, answer completeness | `input`, `response`, `trace`, `expected_outcome` |
+
+Omitting both `metrics` and `preset` retains the single `AnswerRelevancy()` check.
+Choose an explicit preset for the broader checks above.
 
 **Choose `preset="rag"` when you want answers checked against contexts.** Passing
 contexts alone leaves the default checks unchanged. Evaluation warns when supplied
@@ -87,15 +93,37 @@ for what each check measures, or [customize your checks](#make-the-checks-yours)
 | Backend | Install | Credentials |
 | --- | --- | --- |
 | `JevBackend` · default | `pip install typed-evals` | `TYPESAFE_API_KEY` |
-| `OpenAIDecisionsBackend` · [OpenAI Decisions](docs/EVALUATION.md#native-openai-decisions) | `pip install 'typed-evals[openai]'` | `OPENAI_API_KEY` |
-| `SystemOneBackend` · [Clef, Laya, Strands, and compatible servers](docs/EVALUATION.md#open-and-self-hosted-system-one-models) | `pip install typed-evals` | Optional server API key |
+| `OpenAIDecisionsBackend` · [OpenAI Decisions](docs/EVALUATION.md#openai-decisions-api) | `pip install 'typed-evals[openai]'` | `OPENAI_API_KEY` |
+| `SystemOneBackend` · [Microsoft Foundry](docs/EVALUATION.md#microsoft-foundry), [Laya, Strands, and compatible servers](docs/EVALUATION.md#open-and-self-hosted-system-one-models) | `pip install typed-evals` | API key / Azure Entra token, or optional server key |
 
 Pass a backend to `evaluate`, `Evaluator`, or `guard_tool` to use it. See
 [provider setup](docs/EVALUATION.md#choose-a-backend) for complete examples.
-[Microsoft-Decision-1](docs/EVALUATION.md#microsoft-decision-1)
-uses `JevBackend` with an OpenRouter model, endpoint, and API key.
+Microsoft-Decision-1 can judge evaluations through
+[Microsoft Foundry](docs/EVALUATION.md#microsoft-foundry) using `SystemOneBackend`,
+or [OpenRouter](docs/EVALUATION.md#microsoft-decision-1) using `JevBackend`.
+
+For Foundry, use your deployment name and resource endpoint plus
+`/providers/microsoft`; supply the Azure key through an injected HTTP client's `api-key` header, or use an Entra bearer token. Keep `image_mode="disabled"` for Decision-1 on either provider.
+
 `SystemOneBackend` connects to a deployed `/v1/systemone` server with an explicit
-model and API root; local servers can run without a key.
+model and API root; local servers can run without a key. For a vision-capable
+model on a server accepting SGLang's image extension, set `image_mode="native"`;
+see the [runnable example](examples/systemone_images.py). Images are disabled by
+default for text-only servers and models.
+
+For Jev image evidence, opt in with
+`JevBackend(model="jev-1.14.0", image_mode="experimental")`; see the
+[image guide](docs/EVALUATION.md#image-evidence) and
+[runnable example](examples/jev_images.py). The default model is `jev-1.14.0`,
+with images disabled unless explicitly enabled.
+
+All bundled backends extend the public `BaseBackend` API. Add a provider with a
+different request protocol by extending `BaseBackend` and implementing its async
+session. The base validates shared image inputs; each adapter supplies its image
+transport and capability settings. Existing backends implementing the `Backend`
+protocol also remain supported. See the
+[extension contract](docs/ARCHITECTURE.md#backend-interface)
+and [offline example](examples/offline_demo.py).
 
 **CrewAI compatibility:** the `openai` and `crewai` extras have conflicting OpenAI
 SDK requirements. Install them in separate environments; combining
@@ -140,7 +168,8 @@ from typed_evals import guard_tool
 @guard_tool(
     policy="Only read tickets owned by Alice.",
     input="Read my ticket T-42.",
-    contexts=["Authenticated customer: Alice. Alice owns T-42."],
+    contexts=["read_ticket(ticket_id) reads an existing support ticket."],
+    authorization=["Authenticated customer: Alice. Alice owns T-42."],
 )
 def read_ticket(ticket_id: str) -> str:
     """Read a support ticket's complete text."""
@@ -151,7 +180,7 @@ text = read_ticket("T-42")
 ```
 
 Here, `ticket_store` is your application's ticket service. Supply current
-application-owned authorization facts in `contexts`, and keep deterministic
+application-owned authorization facts in `authorization`, and keep deterministic
 permission checks inside the tool, as `read_authorized` does above.
 
 By default, `ToolSafety` uses a `0.9` threshold. A failed or unavailable judgment
@@ -174,9 +203,19 @@ SDK requirements conflict. CrewAI can use the default Jev backend.
 
 ## Make the checks yours
 
-Choose from [nine built-in metrics](docs/EVALUATION.md#built-in-metrics), select
+Choose from [eleven built-in metrics](docs/EVALUATION.md#built-in-metrics), select
 thresholds with the `metrics` argument, or define a `Metric` with your own rubric.
 For example, `Faithfulness(threshold=0.8)` requires a higher score to pass.
+
+`ContextRelevance()` measures the fraction of retrieved source sentence units
+judged useful: one relevant unit among ten scores `0.1`. Use
+`granularity="passage"` for a coarser passage fraction. `unit_threshold=0.5`
+turns each unit's Noul probability into a boolean relevance decision;
+`threshold` applies to the aggregate score. The judge returns typed probabilities,
+with no generated explanation or rationale. Inspect source-span verdicts in the
+result's `details`. This checks relevance, not the factual truth of retrieved
+claims or their ranking. See the [unit contract](docs/EVALUATION.md#diagnose-individual-claims-and-passages)
+for request costs and unavailable judgments.
 
 See [custom metrics](docs/EVALUATION.md#custom-metrics) for binary, categorical,
 and ordered-score rubrics. Use `Evaluator` to reuse a configured metric panel.
@@ -185,9 +224,10 @@ custom checks with a supported backend.
 
 ## Calibration
 
-A raw judge score of `0.8` does not necessarily mean humans would pass 80% of
+A raw metric score of `0.8` does not necessarily mean humans would pass 80% of
 similar examples. Opt-in calibration fits metric scores to representative human
-pass/fail labels using `EvaluationPipeline`.
+pass/fail labels using `EvaluationPipeline`. Context relevance's raw fraction is
+not a probability; its fitted curve estimates human acceptance of the retrieval.
 
 `CalibrationConfig(enabled=True)` automatically uses **Venn–Abers below 2,000
 labeled training rows per metric**, and **isotonic at 2,000 or more**. You can choose
@@ -235,7 +275,8 @@ Try [runtime_guardrails.py](examples/runtime_guardrails.py) for enforcement or
 
 Browse [runnable examples](examples/) and the [introductory](notebooks/sample_notebook.ipynb)
 or [advanced](notebooks/advanced_usage.ipynb) notebooks. For individual unsupported
-claims and retrieval noise, try the [claim and passage recipe](examples/granular_rag_evaluation.py).
+claims and retrieval noise, try the [claim and source-unit example](examples/granular_rag_evaluation.py).
+See the [FAQ](docs/FAQ.md#what-do-the-repository-notebooks-need) for notebook dependencies.
 
 ## Contribute
 

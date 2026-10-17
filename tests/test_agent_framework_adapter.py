@@ -49,7 +49,8 @@ async def test_native_framework_injects_context_and_guards_normalized_arguments(
     wrapped = guard_tool(
         policy="Read owned tickets only",
         input=lambda ctx: ctx.kwargs["request"],
-        contexts=lambda ctx: ctx.kwargs["evidence"],
+        contexts=["read(ticket_id) reads a support ticket"],
+        authorization=lambda ctx: ctx.kwargs["evidence"],
         backend=backend,
         name="read_ticket",
     )(aread if async_tool else read)
@@ -69,6 +70,8 @@ async def test_native_framework_injects_context_and_guards_normalized_arguments(
         assert executed == [("T-42", False)]
     judged = backend.calls[0][0]
     assert judged["input"] == "Read T-42"
+    assert judged["authorization"] == ["Alice owns T-42"]
+    assert "Alice owns" not in str(judged["contexts"])
     assert judged["proposed_tool_call"] == {
         "name": "read_ticket",
         "arguments": {"ticket_id": "T-42", "full": False},
@@ -97,7 +100,8 @@ async def test_framework_unavailable_judgments_block_without_execution(mode):
     @guard_tool(
         policy="Owned only",
         input="Read",
-        contexts=["Owned"],
+        contexts=["read(ticket_id) reads a support ticket"],
+        authorization=["Owned"],
         backend=backend,
         timeout=0.01 if mode == "timeout" else None,
     )
@@ -119,22 +123,30 @@ async def test_framework_missing_evidence_does_not_judge_or_execute():
     @guard_tool(
         policy="Owned only",
         input=lambda ctx: ctx.kwargs["request"],
-        contexts=lambda ctx: ctx.kwargs["evidence"],
+        contexts=["read(ticket_id) reads a support ticket"],
+        authorization=lambda ctx: ctx.kwargs["evidence"],
         backend=backend,
     )
     def read(ticket_id: str, ctx: FunctionInvocationContext) -> str:
         """Read a ticket."""
         raise AssertionError("must not execute")
 
-    with pytest.raises(ValueError, match="contexts"):
+    with pytest.raises(ValueError, match="authorization"):
         await read.invoke(arguments={"ticket_id": "T-42"}, context=runtime(read, evidence=[]))
     assert not backend.calls
 
 
 async def test_framework_alternate_context_parameter_and_argument_snapshot():
-    backend = FakeBackend(
-        lambda state, questions: {name: {"type": "noul", "noul": 0.99} for name in questions},
-        delay=0.02,
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class WaitingBackend(FakeBackend):
+        async def judge(self, state, questions):
+            entered.set()
+            await release.wait()
+            return await super().judge(state, questions)
+
+    backend = WaitingBackend(
+        lambda state, questions: {name: {"type": "noul", "noul": 0.99} for name in questions}
     )
     executed = []
 
@@ -142,7 +154,8 @@ async def test_framework_alternate_context_parameter_and_argument_snapshot():
     @guard_tool(
         policy="Owned only",
         input="Read",
-        contexts=["Alice owns T-42"],
+        contexts=["read(ticket_id) reads a support ticket"],
+        authorization=["Alice owns T-42"],
         backend=backend,
         context_parameter="invocation",
     )
@@ -155,11 +168,12 @@ async def test_framework_alternate_context_parameter_and_argument_snapshot():
     task = asyncio.create_task(
         read.invoke(arguments={"payload": {"ids": ["T-42"]}}, context=context, skip_parsing=True)
     )
-    while not backend.calls:
-        await asyncio.sleep(0)
+    await asyncio.wait_for(entered.wait(), timeout=1)
     context.arguments["payload"]["ids"].append("T-99")
+    release.set()
     assert await task == {"ids": ["T-42"]}
     assert executed == [{"ids": ["T-42"]}]
+    assert backend.calls[0][0]["proposed_tool_call"]["arguments"] == {"payload": {"ids": ["T-42"]}}
     assert "invocation" not in read.parameters()["properties"]
 
 
@@ -168,7 +182,12 @@ def test_framework_requires_declared_context_parameter():
         return ticket_id
 
     with pytest.raises(ValueError, match="injected parameters"):
-        guard_tool(policy="Owned only", input="Read", contexts=["Owned"])(read)
+        guard_tool(
+            policy="Owned only",
+            input="Read",
+            contexts=["read(ticket_id) reads a support ticket"],
+            authorization=["Owned"],
+        )(read)
 
 
 def test_framework_rejects_async_evidence_callbacks():
@@ -176,4 +195,9 @@ def test_framework_rejects_async_evidence_callbacks():
         return ["Owned"]
 
     with pytest.raises(TypeError, match="synchronous"):
-        guard_tool(policy="Owned only", input="Read", contexts=evidence)
+        guard_tool(
+            policy="Owned only",
+            input="Read",
+            contexts=["read(ticket_id) reads a support ticket"],
+            authorization=evidence,
+        )

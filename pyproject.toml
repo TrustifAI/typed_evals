@@ -6,13 +6,24 @@ build-backend = "setuptools.build_meta"
 name = "typed_evals"
 version = "0.2.2"
 description = "Typed evaluation and runtime guards for LLM responses and Agents using Decision Models, with opt-in calibration."
+keywords = [
+  "jev",
+  "jev-as-a-judge",
+  "decision-model",
+  "llm-as-a-judge",
+  "llm-evaluation",
+  "rag-evaluation",
+  "agent-evaluation",
+  "calibration",
+  "system-one-models",
+]
 readme = "README.md"
 authors = [
     { name = "Aaryan Verma" }
 ]
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = "MIT"
-dependencies = ["typesafe-sdk>=0.7.0,<0.8", "pydantic>=2.12,<3", "httpx2>=2.0.0,<3"]
+dependencies = ["typesafe-sdk>=0.7.5,<0.8", "pydantic>=2.12,<3", "httpx2>=2.0.0,<3"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Programming Language :: Python :: 3",
@@ -21,12 +32,11 @@ classifiers = [
 ]
 
 [project.urls]
-Author = "https://github.com/Aaryanverma"
 Homepage = "https://github.com/TrustifAI/typed_evals"
 Repository = "https://github.com/TrustifAI/typed_evals"
 Documentation = "https://github.com/TrustifAI/typed_evals/tree/main/docs"
 Issues = "https://github.com/TrustifAI/typed_evals/issues"
-Changelog = "https://github.com/TrustifAI/typed_evals/blob/main/CHANGELOG.md"
+Author = "https://github.com/Aaryanverma"
 
 [project.optional-dependencies]
 openai = ["openai>=3.26.0,<4"]
@@ -55,7 +65,7 @@ addopts = "-ra"
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
@@ -63,7 +73,7 @@ ignore = ["E501"]
 
 [tool.mypy]
 files = ["typed_evals"]
-python_version = "3.11"
+python_version = "3.12"
 check_untyped_defs = true
 warn_redundant_casts = true
 warn_unused_ignores = true

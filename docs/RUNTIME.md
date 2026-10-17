@@ -32,9 +32,11 @@ Migration notes are in the [changelog](../CHANGELOG.md#migration-notes).
 
 ## Backend selection and metadata
 
-Jev remains the default. For native Decisions, install `typed-evals[openai]`, set
+Jev (`jev-1.14.0`) remains the default. For OpenAI Decisions API, install `typed-evals[openai]`, set
 `OPENAI_API_KEY`, and pass `backend=OpenAIDecisionsBackend()` to `guard_tool`, an
-`Evaluator`, or an `EvaluationPipeline`. The same backend is accepted by framework
+`Evaluator`, or an `EvaluationPipeline`; its default model is `gpt-6-luna`.
+`SystemOneBackend(model=..., base_url=...)` connects to an explicitly configured
+compatible server without an extra provider SDK. The same backends are accepted by framework
 adapters when their dependency versions permit it. See [backend configuration](EVALUATION.md#choose-a-backend)
 for hosted TypeSafe-compatible models and client ownership.
 
@@ -56,6 +58,43 @@ Runtime audit data is available under `metadata["typed_evals"]` for every backen
 The legacy `metadata["jev"]` key aliases the same payload for backward compatibility.
 Inspect the evaluation's actual model and metric data to identify the judgment.
 
+## Metric panels and evidence
+
+Guard checkpoints use exactly the evaluator's selected metrics. The default
+evaluator checks only `AnswerRelevancy`. The `"response"` preset adds
+`AnswerCompleteness`; `"rag"` checks both plus `Faithfulness`, `ContextRelevance`,
+and `ContextSufficiency`. The `"agent"` preset checks `TaskCompletion`,
+`ToolGrounding`, `AnswerRelevancy`, and `AnswerCompleteness`, requiring an observed
+`trace` and an explicit `expected_outcome` as well as `input` and `response`.
+Tool permission and argument checks require explicit `ToolSafety` and
+`ToolAccuracy` metrics; they are not included in the agent preset.
+
+An omitted or `None` `contexts`/`trace` field is missing evidence. An explicit
+empty sequence records that retrieval or execution produced no results and is
+evaluated. For example, `ContextRelevance` scores empty contexts as `0` without a
+judge request; that is a failed metric governed by `on_fail`. Missing or unusable
+judgments instead follow `on_error`. Empty responses are also evaluated. The
+`guard_tool` helpers require nonempty `contexts` and `authorization` evidence,
+even though a direct `EvaluationSample` can represent empty retrieval.
+
+At a retrieval checkpoint, `ContextRelevance` deterministically segments source
+sentences and asks a typed true/false relevance question for each unit. A unit
+counts as relevant when its returned probability meets `unit_threshold`; the raw
+score is relevant units divided by all units, not an average of probabilities.
+The metric's `threshold` applies to the resulting fraction, or to calibrated
+metric-pass probability when calibration is supplied. Optional passage granularity
+is coarser. This check measures usefulness for the request, not source truth or
+retrieval ranking; pair it with `ContextSufficiency` for coverage.
+
+Unit requests run in bounded chunks within the shared judge session, and the
+checkpoint timeout covers the complete evaluation. Reports retain unit
+probabilities, verdicts, source offsets, and availability counts without raw
+source text or generated rationales. If any unit judgment is invalid, omitted,
+refused, or encounters a provider failure, the aggregate is unavailable; it never
+scores only the successful subset.
+Use `Evaluator(errors="record")` to retain its diagnostics and successful sibling
+metrics. See [retrieval diagnostics](EVALUATION.md#diagnose-individual-claims-and-passages).
+
 ## Guard a Python tool
 
 ```python
@@ -65,7 +104,8 @@ from typed_evals import guard_tool
 @guard_tool(
     policy="Only read tickets owned by Alice.",
     input="Read my ticket T-42.",
-    contexts=["Authenticated customer: Alice. Alice owns T-42."],
+    contexts=["read_ticket(ticket_id) reads an existing support ticket."],
+    authorization=["Authenticated customer: Alice. Alice owns T-42."],
 )
 def read_ticket(ticket_id: str) -> str:
     """Read a support ticket's complete text."""
@@ -76,7 +116,7 @@ text = read_ticket("T-42")
 ```
 
 `ticket_store` represents your application's service. Register the decorated
-function with your framework. `input` and `contexts` can also be synchronous
+function with your framework. `input`, `contexts`, and `authorization` can be synchronous
 callbacks receiving a mapping of the tool's bound arguments, including defaults.
 These callbacks should use the application's authenticated request context to
 provide current facts; model-supplied claims of authorization are not evidence.
@@ -87,7 +127,9 @@ and user claims cannot grant access.
 The helper builds a `ToolSafety(policy=..., threshold=0.9)` evaluator and a
 `before_tool` checkpoint. It captures the function name, signature/docstring,
 JSON arguments, and a unique invocation ID. `contexts` must contain at least one
-nonblank application-owned evidence string. A missing answer is represented
+nonblank tool specification or known fact; `authorization` must separately contain
+application-owned permission facts. Never copy authorization from retrieved text
+or model arguments. A missing answer is represented
 internally; users do not construct an empty response or a proposal object.
 
 Sync and async functions preserve their signature and native output. Arguments
@@ -115,7 +157,8 @@ from typed_evals.adapters.langchain import guard_tool
 @tool
 @guard_tool(
     policy="Only read tickets owned by the authenticated customer.",
-    contexts=lambda runtime: runtime.context["authorization_evidence"],
+    contexts=["read_ticket(ticket_id) reads an existing support ticket."],
+    authorization=lambda runtime: runtime.context["authorization_evidence"],
 )
 def read_ticket(ticket_id: str, runtime: ToolRuntime[dict]) -> str:
     """Read the complete text of a support ticket."""
@@ -129,7 +172,7 @@ tool schema. The judge receives the latest human message's text, the tool's publ
 arguments and description, and your explicitly supplied evidence. It does not
 automatically receive runtime state, configuration, or credentials.
 
-`contexts` accepts a nonempty sequence of evidence strings or a synchronous
+`contexts` and `authorization` each accept a nonempty sequence of evidence strings or a synchronous
 callback of `ToolRuntime` returning that sequence. Register the decorated tool
 and pass current application-owned facts through the agent's runtime context:
 
@@ -240,10 +283,8 @@ sample = EvaluationSample(
     input="Read ticket T-42.",
     response="",  # No answer has been generated at this boundary.
     proposed_tool_call=ToolProposal(name="read_ticket", arguments={"ticket_id": "T-42"}),
-    contexts=(
-        "read_ticket(ticket_id: str) reads an existing ticket without modifying it.",
-        "The authenticated customer owns T-42 and is authorized to read it.",
-    ),
+    contexts=("read_ticket(ticket_id: str) reads an existing ticket without modifying it.",),
+    authorization=("The authenticated customer owns T-42 and is authorized to read it.",),
 )
 
 try:
@@ -265,8 +306,8 @@ tool schemas and access controls in your dispatcher as well.
 
 `call_tool` snapshots the selected callable and nested JSON arguments before
 awaiting the judge. Mutating the original proposal or registry during evaluation cannot
-change that dispatch. Supply current, application-owned tool specifications,
-authorization facts, and known argument values as evidence. The tool must still
+change that dispatch. Supply tool specifications and known argument values in
+`contexts`, and current application-owned permission facts in `authorization`. The tool must still
 enforce authorization against current state when it executes; a judgment is not
 an authorization token and cannot prevent external state changes.
 
@@ -319,19 +360,23 @@ print(response.metadata["typed_evals"]["hallucination_suspected"])
 ```
 
 `hallucination_suspected` is `True` when the judge fails `faithfulness` or
-`tool_grounding` at the configured threshold, `False` when the evaluated grounding
-checks pass, and `None` when no grounding check yields a usable conclusion.
+`tool_grounding` at the configured threshold. It is `False` only when at least one
+grounding check was evaluated and all grounding checks passed with usable scores.
+It is `None` when no grounding checks ran, or when a grounding check or whole
+judgment was unavailable and none failed, even if another check passed.
 It is a judge's evidence-relative finding, not an independent determination of
 truth. Missing evidence is never reported as a clean grounding result. Other
 custom metric failures appear under `failed_metrics`; they do not implicitly
 acquire hallucination semantics.
 
-Each decision records its checkpoint, unique ID, action, failed/unavailable
-metrics, per-metric raw and calibrated scores, thresholds, observed judge model,
-usage, sample hash, and evaluation duration where available. Provider exceptions
-are recorded by type, without their potentially sensitive message bodies. The
-guard stores no shared history; accumulate `result.decisions` in your own run
-record. Neither evidence nor native output is automatically persisted.
+Each decision records its checkpoint, unique ID, action, and failed/unavailable
+metrics. When evaluation results are available, they include per-metric raw and
+calibrated scores, thresholds, observed judge model, usage, sample hash, and
+evaluation duration. Provider exceptions are recorded by type, without their
+potentially sensitive message bodies; a failed evaluation can leave
+`decision.evaluation` as `None`. The guard stores no shared history; accumulate
+`result.decisions` in your own run record. Neither evidence nor native output is
+automatically persisted.
 
 `respond`/`arespond` evaluate an already materialized result before releasing it.
 The sample must describe that exact result. Merge `response.metadata` into your
@@ -384,8 +429,8 @@ different agents/tools can use different policies or evaluators.
 |---|---|---|
 | Before accepting input | Candidate input mapped to `response`; `PolicyCompliance` or custom abuse/injection rubric | Block or escalate |
 | Before model invocation | Proposed prompt mapped to `response`; custom disclosure, scope, and instruction-policy metrics | Block or annotate |
-| After model generation | Generated draft, source passages; `Faithfulness`, `AnswerRelevancy`, reference correctness | Annotate or regenerate |
-| After retrieval, before consumption | Retrieved passages; `ContextRelevance`, custom source/injection checks | Re-retrieve or block |
+| After model generation | Generated draft, source passages; `Faithfulness`, `AnswerRelevancy`, `AnswerCompleteness`, reference correctness | Annotate or regenerate |
+| After retrieval, before consumption | Retrieved passages; `ContextRelevance`, `ContextSufficiency`, custom source/injection checks | Re-retrieve or block |
 | Before tool execution | `proposed_tool_call`, tool specs, authorization facts; `ToolSafety`, `ToolAccuracy` | Block or escalate |
 | After tool execution, before consumption | Observed `trace`; custom output integrity metric, or mapped content with `PolicyCompliance` | Withhold or annotate |
 | Before subagent dispatch/handoff | Delegated task or handoff payload mapped to `response`; scope, privacy, and completeness rubrics | Block or revise |
@@ -562,13 +607,13 @@ from typed_evals import guarded_by, ToolProposal
         ),
         contexts=(
             "read_ticket(ticket_id: str) reads a ticket without modifying it.",
-            "The authenticated customer is authorized to read T-42 only.",
         ),
+        authorization=("The authenticated customer Alice is authorized to read T-42 only.",),
     ),
     native_output=True,
 )
 def read_ticket(ticket_id: str) -> dict:
-    return ticket_store.read(ticket_id)
+    return ticket_store.read_authorized("Alice", ticket_id)
 
 
 # Construct the framework agent with the decorated callable:

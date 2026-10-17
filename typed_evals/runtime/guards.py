@@ -522,7 +522,7 @@ def _tool_result_builder(mapper: Callable[[Any], JsonValue] | None) -> Callable:
         return EvaluationSample.model_validate(
             {
                 **sample.model_dump(mode="python"),
-                "trace": (*sample.trace, event),
+                "trace": (*(sample.trace or ()), event),
                 "proposed_tool_call": None,
             }
         )

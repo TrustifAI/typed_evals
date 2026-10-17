@@ -1,7 +1,10 @@
 """Typed judge evaluation, with optional per-metric probability calibration."""
 
+from importlib.metadata import version as _distribution_version
+
 from typed_evals.backends import (
     Backend,
+    BaseBackend,
     JevBackend,
     JudgeResponse,
     JudgeSession,
@@ -12,11 +15,14 @@ from typed_evals.calibration import (
     CalibrationBundle,
     CalibrationConfig,
     IsotonicCalibrator,
+    ThresholdDiagnostics,
     VennAbersCalibrator,
 )
 from typed_evals.data.datasets import load_calibration_dataset, load_dataset
 from typed_evals.data.models import (
     CalibrationExample,
+    ContextRelevanceDetails,
+    ContextUnitResult,
     EvaluationReport,
     EvaluationSample,
     ImageInput,
@@ -28,10 +34,18 @@ from typed_evals.data.models import (
 from typed_evals.evaluation.decorators import EvaluatedResponse, evaluated_by
 from typed_evals.evaluation.evaluator import Evaluator, aevaluate, evaluate
 from typed_evals.evaluation.pipeline import EvaluationPipeline
+from typed_evals.evaluation.validation import (
+    MetricValidationReport,
+    ValidationReport,
+    avalidate_metrics,
+    validate_metrics,
+)
 from typed_evals.metrics import (
+    AnswerCompleteness,
     AnswerCorrectness,
     AnswerRelevancy,
     ContextRelevance,
+    ContextSufficiency,
     Faithfulness,
     Metric,
     PolicyCompliance,
@@ -52,15 +66,20 @@ from typed_evals.runtime.guards import (
 )
 from typed_evals.runtime.tools import guard_tool
 
-__version__ = "0.2.1"
+__version__ = _distribution_version("typed_evals")
 __all__ = [
     "AnswerCorrectness",
+    "AnswerCompleteness",
     "AnswerRelevancy",
     "Backend",
+    "BaseBackend",
     "CalibrationBundle",
     "CalibrationConfig",
     "CalibrationExample",
     "ContextRelevance",
+    "ContextRelevanceDetails",
+    "ContextSufficiency",
+    "ContextUnitResult",
     "EvaluatedResponse",
     "EvaluationPipeline",
     "EvaluationReport",
@@ -79,6 +98,7 @@ __all__ = [
     "JudgeSession",
     "Metric",
     "MetricResult",
+    "MetricValidationReport",
     "OpenAIDecisionsBackend",
     "PolicyCompliance",
     "RuntimeGuard",
@@ -90,7 +110,10 @@ __all__ = [
     "ToolGrounding",
     "ToolProposal",
     "ToolSafety",
+    "ThresholdDiagnostics",
     "VennAbersCalibrator",
+    "ValidationReport",
+    "avalidate_metrics",
     "aevaluate",
     "evaluate",
     "evaluated_by",
@@ -100,4 +123,5 @@ __all__ = [
     "list_metrics",
     "load_calibration_dataset",
     "load_dataset",
+    "validate_metrics",
 ]

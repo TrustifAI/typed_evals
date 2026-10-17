@@ -1,9 +1,15 @@
+import asyncio
 import builtins
+import inspect
 import json
+import traceback
 
 import pytest
+from conftest import calibrated_rows
 
 from typed_evals import (
+    AnswerRelevancy,
+    CalibrationConfig,
     EvaluationPipeline,
     EvaluationReport,
     EvaluationSample,
@@ -20,33 +26,88 @@ from typed_evals.data.models import SampleResult
 from typed_evals.errors import CalibrationError, MissingInputError
 
 
-def test_json_and_jsonl_datasets(tmp_path, sample):
+@pytest.mark.parametrize("suffix", ["json", "jsonl"])
+def test_json_and_jsonl_datasets(tmp_path, sample, suffix):
     data = sample.model_dump(mode="json")
-    path = tmp_path / "samples.json"
-    path.write_text(json.dumps([data]))
+    path = tmp_path / f"samples.{suffix}"
+    path.write_text(json.dumps([data]) if suffix == "json" else "\n" + json.dumps(data) + "\n\n")
     assert load_dataset(path) == [sample]
-    path = tmp_path / "samples.jsonl"
-    path.write_text("\n" + json.dumps(data) + "\n\n")
-    assert load_dataset(path) == [sample]
-    path = tmp_path / "calibration.jsonl"
-    path.write_text(json.dumps({"sample": data, "labels": {"faithfulness": True}}) + "\n")
-    assert load_calibration_dataset(path)[0].labels == {"faithfulness": 1}
+    calibration = {"sample": data, "labels": {"faithfulness": True}}
+    path = tmp_path / f"calibration.{suffix}"
+    path.write_text(
+        json.dumps([calibration]) if suffix == "json" else json.dumps(calibration) + "\n"
+    )
+    loaded = load_calibration_dataset(path)
+    assert loaded[0].sample == sample
+    assert loaded[0].labels == {"faithfulness": 1}
+
+
+@pytest.mark.parametrize("suffix", ["json", "jsonl"])
+@pytest.mark.parametrize("calibration", [False, True])
+@pytest.mark.parametrize("invalid_field", ["contexts", "trace"])
+def test_dataset_validation_tracebacks_hide_row_values(
+    tmp_path, sample, suffix, calibration, invalid_field
+):
+    sentinel = "PRIVATE_TEST_MARKER__dataset_validation"
+    valid = sample.model_dump(mode="json")
+    invalid = dict(valid)
+    if invalid_field == "contexts":
+        invalid["contexts"] = sentinel
+        location = "contexts"
+    else:
+        invalid["trace"] = [{"name": "tool", "status": sentinel}]
+        location = "trace.0.status"
+    if calibration:
+        valid = {"sample": valid, "labels": {"faithfulness": 1}}
+        invalid = {"sample": invalid, "labels": {"faithfulness": 1}}
+        location = f"sample.{location}"
+    path = tmp_path / f"private.{suffix}"
+    path.write_text(
+        json.dumps([valid, invalid])
+        if suffix == "json"
+        else "\n" + json.dumps(valid) + "\n" + json.dumps(invalid) + "\n"
+    )
+    loader = load_calibration_dataset if calibration else load_dataset
+    try:
+        loader(path)
+    except ValueError as exc:
+        message = str(exc)
+        formatted = traceback.format_exc()
+    else:
+        pytest.fail("Invalid row was accepted")
+
+    row_index = 2 if suffix == "json" else 3
+    kind = "calibration" if calibration else "evaluation"
+    assert f"Invalid {kind} row {row_index}" in message
+    assert location in message
+    assert sentinel not in message
+    assert sentinel not in formatted
+    assert "ValidationError" not in formatted
 
 
 @pytest.mark.parametrize(
-    "suffix,payload",
+    "suffix,payload,message",
     [
-        ("json", "{}"),
-        ("jsonl", "{broken}"),
-        ("json", '[{"input": "Q", "response": "A", "typo": 1}]'),
-        ("txt", "anything"),
+        ("json", "{}", "JSON datasets must contain an array of rows"),
+        (
+            "jsonl",
+            '\n{"input": "Q", "response": "A"}\n{broken}',
+            "Invalid JSON in data.jsonl at line 3",
+        ),
+        (
+            "json",
+            '[{"input": "Q", "response": "A", "typo": 1}]',
+            "Invalid evaluation row 1, fields: ['typo']",
+        ),
+        ("txt", "anything", "Dataset must have a .json or .jsonl extension"),
     ],
 )
-def test_bad_datasets_have_actionable_errors(tmp_path, suffix, payload):
+def test_bad_datasets_have_actionable_errors(tmp_path, suffix, payload, message):
     path = tmp_path / f"data.{suffix}"
     path.write_text(payload)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as caught:
         load_dataset(path)
+    assert str(caught.value) == message
 
 
 def test_sync_decorator_preserves_native_output(backend):
@@ -209,8 +270,118 @@ def test_generator_decorator_requires_explicit_materialization(backend):
         evaluated_by(Evaluator(backend=backend), sample_builder=lambda *args: None)(stream)
 
 
-def test_sklearn_is_optional_for_inference_but_required_for_fit(monkeypatch, backend, sample):
-    curve = IsotonicCalibrator(x=[0.2, 0.8], y=[0.3, 0.7], n_samples=100)
+@pytest.mark.parametrize("async_function", [False, True])
+@pytest.mark.parametrize(
+    "output_kind", ["generator", "async_generator", "coroutine", "future", "awaitable"]
+)
+async def test_decorator_rejects_unmaterialized_outputs_before_mapping(
+    backend, async_function, output_kind
+):
+    executed = []
+    builder_calls = []
+
+    def stream():
+        executed.append("generator")
+        yield "piece"
+
+    async def async_stream():
+        executed.append("async_generator")
+        yield "piece"
+
+    async def pending():
+        executed.append("coroutine")
+        return "piece"
+
+    class AwaitableOutput:
+        def __await__(self):
+            executed.append("awaitable")
+            yield
+            return "piece"
+
+    if output_kind == "generator":
+        output = stream()
+    elif output_kind == "async_generator":
+        output = async_stream()
+    elif output_kind == "coroutine":
+        output = pending()
+    elif output_kind == "future":
+        output = asyncio.get_running_loop().create_future()
+    else:
+        output = AwaitableOutput()
+
+    def agent():
+        return output
+
+    async def async_agent():
+        return output
+
+    def build_samples(*args):
+        builder_calls.append(args)
+        return EvaluationSample(input="Q", response="A")
+
+    wrapped = evaluated_by(Evaluator(backend=backend), sample_builder=build_samples)(
+        async_agent if async_function else agent
+    )
+    try:
+        with pytest.raises(TypeError, match="materialized before evaluation"):
+            if async_function:
+                await wrapped()
+            else:
+                wrapped()
+        assert not executed
+        assert not builder_calls
+        assert not backend.calls
+        assert backend.sessions == 0
+        # Rejection leaves these caller-owned objects available for explicit handling.
+        if inspect.isgenerator(output):
+            assert inspect.getgeneratorstate(output) == inspect.GEN_CREATED
+        elif inspect.isasyncgen(output):
+            assert output.ag_frame is not None
+        elif inspect.iscoroutine(output):
+            assert inspect.getcoroutinestate(output) == inspect.CORO_CREATED
+        elif isinstance(output, asyncio.Future):
+            assert not output.done()
+    finally:
+        if inspect.isgenerator(output) or inspect.iscoroutine(output):
+            output.close()
+        elif inspect.isasyncgen(output):
+            await output.aclose()
+        elif isinstance(output, asyncio.Future):
+            output.cancel()
+
+
+@pytest.mark.parametrize("async_function", [False, True])
+async def test_decorator_accepts_explicitly_materialized_streams(backend, async_function):
+    native = list(piece for piece in ("Done",))
+
+    def agent():
+        return native
+
+    async def async_agent():
+        return native
+
+    wrapped = evaluated_by(
+        Evaluator(backend=backend),
+        sample_builder=lambda output, args, kwargs: EvaluationSample(
+            input="Run a task", response="".join(output)
+        ),
+    )(async_agent if async_function else agent)
+    result = await wrapped() if async_function else wrapped()
+    assert result.output is native
+    assert isinstance(result.evaluation, SampleResult)
+    assert result.evaluation.passed
+
+
+def test_saved_isotonic_calibration_loads_and_thresholds_without_sklearn(
+    monkeypatch, scoring_backend, tmp_path
+):
+    config = CalibrationConfig(
+        enabled=True, algorithm="isotonic", min_samples=20, min_validation_samples=10
+    )
+    fitted = EvaluationPipeline(backend=scoring_backend, calibration=config)
+    fitted.fit(calibrated_rows(), validation_data=calibrated_rows("holdout"))
+    artifact = tmp_path / "calibration.json"
+    fitted.save_calibration(artifact)
     original_import = builtins.__import__
 
     def without_sklearn(name, *args, **kwargs):
@@ -219,35 +390,17 @@ def test_sklearn_is_optional_for_inference_but_required_for_fit(monkeypatch, bac
         return original_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", without_sklearn)
-    assert curve.predict(0.5) == pytest.approx(0.5)
-    assert Evaluator(backend=backend).evaluate_one(sample).passed
+    restored = EvaluationPipeline(
+        [AnswerRelevancy(threshold=0.7)], backend=scoring_backend, calibration=config
+    ).load_calibration(artifact)
+    result = restored.evaluate_one(EvaluationSample(input="production query", response="0.8"))
+    assert result.metrics["answer_relevancy"].raw_score == 0.8
+    assert result.metrics["answer_relevancy"].calibrated_probability == pytest.approx(0.6)
+    assert result.passed is False
+    calls_before = len(scoring_backend.calls)
     with pytest.raises(CalibrationError, match=r"typed_evals\[calibration\]"):
         IsotonicCalibrator.fit([0.1, 0.2, 0.7, 0.8], [0, 0, 1, 1])
-
-
-def test_cli_writes_report_and_ci_exit_status(tmp_path, monkeypatch, backend, sample):
-    import typed_evals.cli as cli
-
-    monkeypatch.setattr(cli, "JevBackend", lambda **kwargs: backend)
-    dataset = tmp_path / "data.json"
-    output = tmp_path / "report.json"
-    dataset.write_text(json.dumps([sample.model_dump(mode="json")]))
-    assert main(["evaluate", str(dataset), "--output", str(output)]) == 0
-    assert output.exists()
-    assert (
-        main(
-            [
-                "evaluate",
-                str(dataset),
-                "--output",
-                str(output),
-                "--threshold",
-                "0.9",
-                "--fail-on-failure",
-            ]
-        )
-        == 1
-    )
+    assert len(scoring_backend.calls) == calls_before
 
 
 def test_cli_invalid_dataset_returns_error_without_network(tmp_path, monkeypatch, backend, capsys):

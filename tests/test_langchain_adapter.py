@@ -33,7 +33,8 @@ async def test_real_langgraph_injection_schema_and_enforcement(async_tool, async
 
     wrapped = guard_tool(
         policy="Read owned tickets only",
-        contexts=["Alice owns T-42"],
+        contexts=["read(ticket_id) reads a support ticket"],
+        authorization=["Alice owns T-42"],
         backend=backend,
         name="read_ticket",
     )(aread if async_tool else read)
@@ -74,6 +75,8 @@ async def test_real_langgraph_injection_schema_and_enforcement(async_tool, async
         assert result["messages"][-1].content == "Your refund has been approved."
     judged = backend.calls[0][0]
     assert judged["input"] == "Read my ticket T-42"
+    assert judged["authorization"] == ["Alice owns T-42"]
+    assert "Alice owns" not in str(judged["contexts"])
     assert judged["proposed_tool_call"] == {
         "name": "read_ticket",
         "arguments": {"ticket_id": "T-42"},

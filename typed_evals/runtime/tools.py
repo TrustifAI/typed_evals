@@ -30,6 +30,7 @@ def guard_tool(
     policy: str,
     input: str | Callable[[Mapping[str, Any]], str],
     contexts: Sequence[str] | Callable[[Mapping[str, Any]], Sequence[str]],
+    authorization: Sequence[str] | Callable[[Mapping[str, Any]], Sequence[str]],
     threshold: float = 0.9,
     backend: Backend | None = None,
     on_fail: FailureAction = "block",
@@ -39,22 +40,27 @@ def guard_tool(
 ) -> Callable:
     """Guard a sync/async Python tool, preserving its signature and native output.
 
-    input/contexts can be fixed values or synchronous functions of bound arguments.
-    Supply application-owned authorization facts in contexts. Captures the tool name,
+    input/contexts/authorization can be fixed values or synchronous functions of bound arguments.
+    Supply authenticated application permission facts in authorization and tool specifications
+    or other facts in contexts. Captures the tool name,
     JSON arguments (including defaults), signature/docstring, and a unique call ID.
     Register the decorated function with your framework. For injected runtime objects,
     use a framework adapter or the advanced guarded_by API.
     """
-    for value in (input, contexts):
+    for value in (input, contexts, authorization):
         if callable(value):
             _sync_mapper(value)
     fixed_contexts = None if callable(contexts) else _contexts(contexts)
+    fixed_authorization = None if callable(authorization) else _authorization(authorization)
     guard = _make_guard(policy, threshold, backend, on_fail, on_error, timeout)
 
     def evidence(arguments: dict[str, Any]) -> dict[str, Any]:
         return {
             "input": input(arguments) if callable(input) else input,
             "contexts": contexts(arguments) if callable(contexts) else fixed_contexts,
+            "authorization": authorization(arguments)
+            if callable(authorization)
+            else fixed_authorization,
         }
 
     def decorate(function: Callable) -> Callable:
@@ -77,12 +83,18 @@ def _make_guard(policy, threshold, backend, on_fail, on_error, timeout) -> Runti
 
 
 def _contexts(value: Sequence[str]) -> tuple[str, ...]:
+    return _evidence_strings(value, field="contexts")
+
+
+def _authorization(value: Sequence[str]) -> tuple[str, ...]:
+    return _evidence_strings(value, field="authorization")
+
+
+def _evidence_strings(value: Sequence[str], *, field: str) -> tuple[str, ...]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or not value:
-        raise ValueError(
-            "contexts must be a nonempty sequence of application-owned evidence strings"
-        )
+        raise ValueError(f"{field} must be a nonempty sequence of evidence strings")
     if any(not isinstance(item, str) or not item.strip() for item in value):
-        raise ValueError("contexts must contain nonblank strings")
+        raise ValueError(f"{field} must contain nonblank strings")
     return tuple(value)
 
 
@@ -120,6 +132,7 @@ def _decorate_tool(
             input=facts["input"],
             response="",
             contexts=(description, *_contexts(facts["contexts"])),
+            authorization=_authorization(facts["authorization"]),
             id=facts.get("id") or uuid4().hex,
             proposed_tool_call=proposal.model_copy(deep=True),
         )

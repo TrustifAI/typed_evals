@@ -6,6 +6,8 @@ from .datasets import (
 )
 from .models import (
     CalibrationExample,
+    ContextRelevanceDetails,
+    ContextUnitResult,
     EvaluationReport,
     EvaluationSample,
     ImageInput,
@@ -18,6 +20,8 @@ from .models import (
 
 __all__ = [
     "CalibrationExample",
+    "ContextRelevanceDetails",
+    "ContextUnitResult",
     "EvaluationReport",
     "EvaluationSample",
     "ImageInput",

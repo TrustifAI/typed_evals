@@ -68,7 +68,7 @@ jobs:
       - name: Smoke test installed wheel
         working-directory: ${{ runner.temp }}
         run: |
-          python -I -c "from importlib.metadata import version; from importlib.resources import files; import typed_evals; assert typed_evals.__version__ == version('typed_evals'); assert files('typed_evals').joinpath('py.typed').is_file()"
+          python -I -c "from importlib.resources import files; import typed_evals; assert files(typed_evals).joinpath('py.typed').is_file()"
           python -I -m typed_evals --help
           typed_evals --help
 
@@ -103,7 +103,7 @@ jobs:
           path: dist
 
       - name: Publish to PyPI
-        # Configure Trusted Publishing on PyPI; see docs/PUBLISHING.md.
+        # Configure Trusted Publishing on PyPI; see CONTRIBUTING.md#releases.
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
         with:
           attestations: true

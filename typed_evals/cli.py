@@ -37,7 +37,11 @@ def main(argv: list[str] | None = None) -> int:
             "--api-key-env", help="Environment variable containing a System One server API key"
         )
         sub.add_argument("--concurrency", type=int, default=8)
-        sub.add_argument("--threshold", type=float, default=0.5)
+        sub.add_argument(
+            "--threshold",
+            type=float,
+            help="Override every selected metric's threshold; otherwise keep each metric's default",
+        )
         sub.add_argument("--output", required=True)
         if command == "evaluate":
             sub.add_argument("--calibration", help="A fitted calibration JSON artifact")
@@ -70,7 +74,12 @@ def main(argv: list[str] | None = None) -> int:
     elif args.base_url is not None or args.api_key_env is not None:
         parser.error("--base-url and --api-key-env require --backend systemone")
     try:
-        metrics = [BUILTIN_METRICS[name](threshold=args.threshold) for name in args.metrics]
+        metrics = [
+            BUILTIN_METRICS[name](
+                **({"threshold": args.threshold} if args.threshold is not None else {})
+            )
+            for name in args.metrics
+        ]
         backend: Backend
         if args.backend == "systemone":
             assert args.model is not None and args.base_url is not None

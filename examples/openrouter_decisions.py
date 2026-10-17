@@ -18,6 +18,7 @@ def main():
         model="microsoft/microsoft-decision-1",
         base_url="https://openrouter.ai/api",
         api_key=os.environ["OPENROUTER_API_KEY"],
+        image_mode="disabled",
     )
     result = evaluate(
         input="What is the refund period?",

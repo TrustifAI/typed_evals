@@ -106,13 +106,18 @@ class EvaluationPipeline:
                 "Calibration data contains repeated sample content; deduplicate first"
             )
         metric_map = {metric.name: metric for metric in self.evaluator.metrics}
-        for row in all_rows:
+        for index, row in enumerate(all_rows):
             unknown = set(row.labels) - metric_map.keys()
             if unknown:
                 raise CalibrationError(f"Unknown metric labels: {sorted(unknown)}")
-            for name in row.labels:
-                if metric_map[name].missing_fields(row.sample):
-                    raise CalibrationError(f"Labeled metric {name} lacks required sample evidence")
+            for name, metric in metric_map.items():
+                absent = metric.missing_fields(row.sample)
+                if absent:
+                    raise CalibrationError(
+                        f"Calibration row {index}: {name} lacks required sample evidence "
+                        f"({', '.join(absent)}). Every row must preserve the complete metric "
+                        "panel; labels may be sparse, required evidence may not."
+                    )
         split: Literal["automatic_group_holdout", "explicit_holdout"]
         if validation_data is None:
             train, validation = self._split(data)
@@ -151,13 +156,30 @@ class EvaluationPipeline:
             self.evaluator.metrics,
             backend=self.evaluator.backend,
             max_concurrency=self.evaluator.max_concurrency,
-            missing="skip",
+            missing="raise",
             errors="raise",
         )
-        # One shared connection pool and one request per sample, never one per metric.
+        # One shared connection pool; decomposed metrics may need several bounded
+        # requests, while known-empty retrieval has a deterministic zero score.
         raw = await judge.aevaluate([row.sample for row in (*train, *validation)])
-        actual_models = {result.model for result in raw.results}
-        if len(actual_models) != 1 or None in actual_models:
+        actual_models = set()
+        for row, result in zip((*train, *validation), raw.results, strict=True):
+            if result.model is not None:
+                actual_models.add(result.model)
+                continue
+            # Only the explicitly observed absence of retrieved evidence can be
+            # scored without a judge. Never hide missing model identity from a
+            # genuine provider response, including a mixed metric panel.
+            deterministic_empty = row.sample.contexts == () and all(
+                metric.aggregation == "relevant_fraction"
+                and result.metrics[metric.name].status == "ok"
+                and result.metrics[metric.name].raw_kind == "relevance_fraction"
+                and result.metrics[metric.name].raw_score == 0
+                for metric in self.evaluator.metrics
+            )
+            if not deterministic_empty:
+                raise CalibrationError("Calibration must use one observed model version")
+        if len(actual_models) != 1:
             raise CalibrationError("Calibration must use one observed model version")
         curves, reports = {}, {}
         for name in metric_map:
@@ -167,11 +189,27 @@ class EvaluationPipeline:
                 IsotonicCalibrator if algorithms[name] == "isotonic" else VennAbersCalibrator
             )
             curve = calibrator.fit(x_train, y_train)
-            before = probability_diagnostics(x_val, y_val, n_bins=self.config.n_bins)
-            after = probability_diagnostics(
-                [curve.predict(value) for value in x_val], y_val, n_bins=self.config.n_bins
+            threshold = metric_map[name].threshold
+            before = probability_diagnostics(
+                x_val, y_val, n_bins=self.config.n_bins, threshold=threshold
             )
+            after = probability_diagnostics(
+                [curve.predict(value) for value in x_val],
+                y_val,
+                n_bins=self.config.n_bins,
+                threshold=threshold,
+            )
+            training_positive_rate = sum(y_train) / len(y_train)
+            constant_prior_brier = sum(
+                (training_positive_rate - label) ** 2 for label in y_val
+            ) / len(y_val)
             notes = []
+            if metric_map[name].raw_kind != "event_probability":
+                notes.append(
+                    f"Raw {metric_map[name].raw_kind} is a numeric probability proxy for "
+                    "Brier, ECE, and log loss; it is not a probability of human metric "
+                    "acceptance. Calibration maps this signal to the labeled metric-pass event."
+                )
             if len(x_train) < 100:
                 notes.append(
                     "Small fit set: this curve may be unstable. Validate with more representative labels."
@@ -188,16 +226,23 @@ class EvaluationPipeline:
                 notes.append(
                     "Held-out log loss did not improve; inspect this metric before deployment."
                 )
+            if after.brier >= constant_prior_brier:
+                notes.append(
+                    "Held-out calibrated Brier score does not beat the constant training-prior "
+                    "baseline; improved calibration alone does not establish useful discrimination."
+                )
             curves[name] = curve
             reports[name] = MetricCalibrationReport(
                 algorithm=curve.algorithm,
+                raw_kind=metric_map[name].raw_kind,
                 training_samples=len(x_train),
                 validation_samples=len(x_val),
-                training_positive_rate=sum(y_train) / len(y_train),
+                training_positive_rate=training_positive_rate,
                 raw=before,
                 calibrated=after,
                 brier_improved=after.brier < before.brier,
                 log_loss_improved=after.log_loss < before.log_loss,
+                constant_prior_brier=constant_prior_brier,
                 notes=tuple(notes),
             )
         report = CalibrationReport(
@@ -207,7 +252,7 @@ class EvaluationPipeline:
             schema_version=3,
             created_at=datetime.now(UTC).isoformat(),
             requested_model=self.evaluator.backend.model,
-            observed_model=cast(str, next(iter(actual_models))),
+            observed_model=next(iter(actual_models)),
             metric_fingerprints={
                 metric.name: metric.fingerprint for metric in self.evaluator.metrics
             },

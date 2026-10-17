@@ -245,7 +245,10 @@ def test_tool_dispatch_uses_reviewed_proposal_once_and_postcheck_observes_result
 
     result = guard.call_tool(
         {"read_ticket": read_ticket},
-        tool_sample(expected_outcome="Ticket T-42 was retrieved."),
+        tool_sample(
+            expected_outcome="Ticket T-42 was retrieved.",
+            authorization=("The authenticated user may read T-42.",),
+        ),
         after="after_tool",
     )
     assert calls == ["T-42"]
@@ -348,19 +351,53 @@ def test_postcheck_denial_withholds_output_but_cannot_undo_side_effects(sample):
 
 def test_non_json_tool_outputs_can_be_mapped_for_postcheck():
     native = object()
+    after = judge(metrics=[TaskCompletion()])
+    mapped = []
+
+    def output_mapper(output):
+        assert output is native
+        mapped.append(output)
+        return {"retrieved": True}
+
     guard = RuntimeGuard(
         {
             "before_tool": GuardPolicy(judge()),
-            "after_tool": GuardPolicy(judge(metrics=[TaskCompletion()])),
+            "after_tool": GuardPolicy(after),
         }
+    )
+    sample = tool_sample(
+        expected_outcome="Read ticket",
+        trace=[{"name": "authenticate", "arguments": {}, "output": "Alice"}],
     )
     result = guard.call_tool(
         {"read_ticket": lambda ticket_id: native},
-        tool_sample(expected_outcome="Read ticket"),
+        sample,
         after="after_tool",
-        output_mapper=lambda output: {"retrieved": output is native},
+        output_mapper=output_mapper,
     )
     assert result.output is native
+    assert mapped == [native]
+    reviewed = after.backend.calls[0][0]
+    assert reviewed["expected_outcome"] == "Read ticket"
+    assert reviewed["trace"] == [
+        {
+            "name": "authenticate",
+            "arguments": {},
+            "output": "Alice",
+            "status": "unknown",
+            "error": None,
+        },
+        {
+            "name": "read_ticket",
+            "arguments": {"ticket_id": "T-42"},
+            "output": {"retrieved": True},
+            "status": "success",
+            "error": None,
+        },
+    ]
+    assert "proposed_tool_call" not in reviewed
+    assert len(sample.trace) == 1
+    assert sample.proposed_tool_call.name == "read_ticket"
 
 
 @pytest.mark.parametrize("case", ["name", "arguments", "proposal", "checkpoint", "after"])
@@ -388,24 +425,39 @@ def test_dispatch_configuration_errors_precede_execution_and_judgment(case):
     assert not evaluator.backend.calls
 
 
-def test_sync_decorator_guards_both_boundaries_and_preserves_function_name(sample):
+def test_sync_decorator_maps_actual_arguments_and_native_result_at_each_boundary():
+    events = []
+    before, after = judge(), judge(0.1)
     guard = RuntimeGuard(
-        {"before": GuardPolicy(judge()), "after": GuardPolicy(judge(0.1), on_fail="annotate")}
+        {"before": GuardPolicy(before), "after": GuardPolicy(after, on_fail="annotate")}
     )
+
+    def before_sample(args, kwargs):
+        events.append("before")
+        return EvaluationSample(input=args[0], response=kwargs["draft"])
+
+    def after_sample(output, args, kwargs):
+        events.append("after")
+        return EvaluationSample(input=args[0], response=output["answer"])
 
     @guarded_by(
         guard,
         before="before",
         after="after",
-        before_sample=lambda args, kwargs: sample,
-        after_sample=lambda output, args, kwargs: sample,
+        before_sample=before_sample,
+        after_sample=after_sample,
     )
-    def framework_call(question):
-        return {"answer": question}
+    def framework_call(question, *, draft):
+        events.append("operation")
+        return {"answer": f"Revised: {draft}"}
 
-    result = framework_call("Q")
-    assert result.output == {"answer": "Q"}
+    result = framework_call("Capital?", draft="Paris")
+    assert result.output == {"answer": "Revised: Paris"}
     assert [d.action for d in result.decisions] == ["allow", "annotate"]
+    assert events == ["before", "operation", "after"]
+    assert before.backend.calls[0][0] == {"input": "Capital?", "response": "Paris"}
+    assert after.backend.calls[0][0] == {"input": "Capital?", "response": "Revised: Paris"}
+    assert result.decisions[0].evaluation.sample_hash != result.decisions[1].evaluation.sample_hash
     assert framework_call.__name__ == "framework_call"
 
 
@@ -524,8 +576,10 @@ def test_proposals_cannot_masquerade_as_observed_results_and_legacy_hash_is_stab
     with pytest.raises(ValidationError):
         ToolProposal(name="  ")
     old_data = sample.model_dump(
-        mode="json", exclude={"id", "group_id", "metadata", "proposed_tool_call", "images"}
+        mode="json",
+        exclude={"id", "group_id", "metadata", "proposed_tool_call", "images", "authorization"},
     )
+    old_data["trace"] = []  # The original schema represented an omitted trace as an empty tuple.
     assert sample.content_hash == digest(old_data)
     proposed = EvaluationSample(
         **{**sample.model_dump(), "proposed_tool_call": ToolProposal(name="read")}

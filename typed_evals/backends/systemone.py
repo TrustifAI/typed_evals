@@ -7,20 +7,56 @@ exchanges typed questions and answers; it never generates or parses judge prose.
 from __future__ import annotations
 
 import asyncio
-import math
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx2
 
+from typed_evals.backends.base import BaseBackend, JudgeResponse, JudgeSession, Question
 from typed_evals.backends.capabilities import validate_evidence
-from typed_evals.backends.jev import JudgeResponse, JudgeSession, Question
+from typed_evals.data.models import ImageInput
 from typed_evals.errors import InvalidAnswerError, SystemOneError
 
 COMPILER_VERSION = "1"
+IMAGE_COMPILER_VERSION = "images-1"
+ImageMode = Literal["disabled", "native"]
+
+
+def _modalities(image_mode: ImageMode) -> frozenset[str]:
+    return frozenset({"text"}) if image_mode == "disabled" else frozenset({"text", "image"})
+
+
+def _validated_images(state: Mapping[str, Any]) -> tuple[ImageInput, ...]:
+    images = BaseBackend.image_inputs(state)
+    if any(image.detail == "original" for image in images):
+        raise ValueError("System One native images support detail='auto', 'low', or 'high'")
+    return images
+
+
+def _compile_request(
+    model: str, state: dict[str, Any], questions: Mapping[str, Question]
+) -> dict[str, Any]:
+    images = _validated_images(state)
+    body: dict[str, Any] = {
+        "model": model,
+        "state": state,
+        "questions": _compile_questions(questions),
+    }
+    if images:
+        # Native images precede the state in list order; the JSON metadata maps
+        # each image to its label without passing the bytes as ordinary text.
+        body["state"] = {
+            **state,
+            "images": [
+                {"index": index, "label": image.label, "detail": image.detail}
+                for index, image in enumerate(images)
+            ],
+        }
+        body["images"] = [{"url": image.data_url, "detail": image.detail} for image in images]
+    return body
 
 
 def _endpoint(base_url: str) -> str:
@@ -94,13 +130,20 @@ class _SystemOneSession:
     endpoint: str = field(repr=False)
     headers: dict[str, str] = field(repr=False)
     max_retries: int
-    supported_modalities: ClassVar[frozenset[str]] = frozenset({"text"})
+    image_mode: ImageMode = "disabled"
+
+    @property
+    def supported_modalities(self) -> frozenset[str]:
+        return _modalities(self.image_mode)
+
+    def validate_state(self, state: Mapping[str, Any]) -> None:
+        _validated_images(state)
 
     async def judge(
         self, state: dict[str, Any], questions: Mapping[str, Question]
     ) -> JudgeResponse:
         validate_evidence(self, state)
-        body = {"model": self.model, "state": state, "questions": _compile_questions(questions)}
+        body = _compile_request(self.model, state, questions)
         for attempt in range(self.max_retries + 1):
             try:
                 response = await self.client.post(self.endpoint, json=body, headers=self.headers)
@@ -153,8 +196,8 @@ class _SystemOneSession:
 
 
 @dataclass
-class SystemOneBackend:
-    """Connect to any text-only Jev-compatible ``/v1/systemone`` server.
+class SystemOneBackend(BaseBackend):
+    """Connect to a Jev-compatible ``/v1/systemone`` server.
 
     ``base_url`` is the API root, including any gateway path prefix. ``model``
     identifies a model deployed there; a Hugging Face repo ID alone does not
@@ -164,6 +207,9 @@ class SystemOneBackend:
     One HTTP client pools a batch's requests. Injected ``httpx2.AsyncClient``
     instances retain their timeout configuration and remain caller-owned; this
     adapter owns its bounded request retries, endpoint, and optional bearer key.
+
+    Enable ``image_mode='native'`` only for a vision-capable endpoint accepting
+    top-level image URL objects (for example, SGLang). Other servers stay text-only.
     """
 
     model: str
@@ -172,24 +218,20 @@ class SystemOneBackend:
     timeout: float = 30.0
     max_retries: int = 2
     client: httpx2.AsyncClient | None = field(default=None, repr=False)
-    supported_modalities: ClassVar[frozenset[str]] = frozenset({"text"})
+    image_mode: ImageMode = "disabled"
+
+    @property
+    def supported_modalities(self) -> frozenset[str]:
+        return _modalities(self.image_mode)
+
+    def validate_state(self, state: Mapping[str, Any]) -> None:
+        _validated_images(state)
 
     def __post_init__(self) -> None:
-        if not isinstance(self.model, str) or not self.model.strip():
-            raise ValueError("model must be a nonempty identifier")
+        super().__post_init__()
+        if self.image_mode not in ("disabled", "native"):
+            raise ValueError("image_mode must be 'disabled' or 'native'")
         _endpoint(self.base_url)
-        try:
-            valid_timeout = (
-                type(self.timeout) in (int, float)
-                and math.isfinite(self.timeout)
-                and self.timeout > 0
-            )
-        except OverflowError:
-            valid_timeout = False
-        if not valid_timeout:
-            raise ValueError("timeout must be positive and finite")
-        if type(self.max_retries) is not int or self.max_retries < 0:
-            raise ValueError("max_retries must be a nonnegative integer")
         if self.api_key is not None and (
             not isinstance(self.api_key, str)
             or not self.api_key
@@ -200,11 +242,27 @@ class SystemOneBackend:
 
     def calibration_provenance(self, questions: Mapping[str, Question]) -> dict[str, Any]:
         compiled = _compile_questions(questions)
+        image_input = any(
+            isinstance(question.instructions, Mapping)
+            and isinstance(
+                modalities := question.instructions.get("required_modalities"), (list, tuple)
+            )
+            and "image" in modalities
+            for question in questions.values()
+        )
         return {
             "provider": "systemone",
             "backend": "systemone",
-            "compiler_version": COMPILER_VERSION,
+            "compiler_version": IMAGE_COMPILER_VERSION if image_input else COMPILER_VERSION,
             "endpoint": _endpoint(self.base_url),
+            **(
+                {
+                    "image_mode": self.image_mode,
+                    "input_serialization": "json-state+ordered-image-url-parts-v1",
+                }
+                if image_input
+                else {}
+            ),
             "questions": [
                 {
                     "name": name,
@@ -222,7 +280,11 @@ class SystemOneBackend:
         endpoint = _endpoint(self.base_url)
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key is not None else {}
         if self.client is not None:
-            yield _SystemOneSession(self.client, self.model, endpoint, headers, self.max_retries)
+            yield _SystemOneSession(
+                self.client, self.model, endpoint, headers, self.max_retries, self.image_mode
+            )
             return
         async with httpx2.AsyncClient(timeout=self.timeout) as client:
-            yield _SystemOneSession(client, self.model, endpoint, headers, self.max_retries)
+            yield _SystemOneSession(
+                client, self.model, endpoint, headers, self.max_retries, self.image_mode
+            )

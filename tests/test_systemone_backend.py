@@ -78,7 +78,10 @@ def panel():
     ]
 
 
-async def test_roundtrip_all_primitives_preserves_sdk_questions_and_selected_evidence(sample):
+@pytest.mark.parametrize("with_usage", [False, True])
+async def test_roundtrip_all_primitives_preserves_sdk_questions_and_selected_evidence(
+    sample, with_usage
+):
     requests = []
     answers = {
         "predicate": {"type": "noul", "noul": 0.9},
@@ -98,9 +101,8 @@ async def test_roundtrip_all_primitives_preserves_sdk_questions_and_selected_evi
 
     def handler(request):
         requests.append(request)
-        return httpx2.Response(
-            200, json=wire_response(answers, usage={"input_tokens": 12, "output_tokens": 0})
-        )
+        optional_usage = {"usage": {"input_tokens": 12, "output_tokens": 0}} if with_usage else {}
+        return httpx2.Response(200, json=wire_response(answers, **optional_usage))
 
     metrics = panel()
     async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
@@ -124,7 +126,7 @@ async def test_roundtrip_all_primitives_preserves_sdk_questions_and_selected_evi
     assert result.metrics["classification"].selected_choice == "good"
     assert result.metrics["ordinal"].raw_score == 0.75
     assert result.metrics["ordinal"].raw_kind == "normalized_ordinal_score"
-    assert result.usage == {"input_tokens": 12, "output_tokens": 0}
+    assert result.usage == ({"input_tokens": 12, "output_tokens": 0} if with_usage else {})
 
 
 @pytest.mark.parametrize("api_key", [None, API_KEY])
@@ -490,20 +492,31 @@ async def test_missing_answer_is_independently_unavailable(sample):
         Metric(name=name, instructions="Pass?", pass_definition="Pass")
         for name in ("good", "missing")
     ]
-    async with httpx2.AsyncClient(
-        transport=httpx2.MockTransport(
-            lambda request: httpx2.Response(
-                200, json=wire_response({"good": {"type": "noul", "noul": 0.9}})
-            )
-        )
-    ) as client:
-        async with backend(client).session() as session:
-            result = await session.judge(
-                {"input": sample.input, "response": sample.response},
-                {metric.name: metric.question() for metric in metrics},
-            )
-    assert result.answers == {"good": {"type": "noul", "noul": 0.9}}
-    assert result.answer_errors == {"missing": "invalid_answer"}
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx2.Response(200, json=wire_response({"good": {"type": "noul", "noul": 0.9}}))
+
+    async with httpx2.AsyncClient(transport=httpx2.MockTransport(handler)) as client:
+        configured = backend(client, max_retries=2)
+        report = await Evaluator(metrics, backend=configured, errors="record").aevaluate([sample])
+        with pytest.raises(InvalidAnswerError, match="missing"):
+            await Evaluator(metrics, backend=configured).aevaluate_one(sample)
+        assert not client.is_closed
+
+    row = report.results[0]
+    assert row.metrics["good"].raw_score == 0.9
+    assert row.metrics["good"].passed is True
+    missing = row.metrics["missing"]
+    assert missing.status == "error"
+    assert missing.raw_score is missing.score is missing.passed is None
+    assert row.passed is None
+    assert report.summary["good"].evaluated == 1
+    assert report.summary["missing"].evaluated == 0
+    assert report.summary["missing"].errors == 1
+    # A structurally successful HTTP response with an omitted answer is not retryable.
+    assert len(requests) == 2
 
 
 @pytest.mark.parametrize(
@@ -582,14 +595,6 @@ async def test_known_token_counters_do_not_coerce_malformed_values(name, value, 
     ) as client:
         with pytest.raises(InvalidAnswerError):
             await Evaluator(backend=backend(client)).aevaluate_one(sample)
-
-
-async def test_omitted_usage_is_empty(sample):
-    async with httpx2.AsyncClient(
-        transport=httpx2.MockTransport(lambda request: httpx2.Response(200, json=wire_response()))
-    ) as client:
-        result = await Evaluator(backend=backend(client)).aevaluate_one(sample)
-    assert result.usage == {}
 
 
 async def test_image_evidence_is_rejected_before_network(sample):

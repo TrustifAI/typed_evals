@@ -33,7 +33,8 @@ async def main():
     @guard_tool(
         policy="Only read tickets owned by the authenticated customer.",
         input=lambda ctx: ctx.kwargs["request"],
-        contexts=lambda ctx: ctx.kwargs["authorization_evidence"],
+        contexts=["read_ticket reads a support ticket."],
+        authorization=lambda ctx: ctx.kwargs["authorization_evidence"],
         backend=DemoJudge(),
     )
     async def read_ticket(ticket_id: str, ctx: FunctionInvocationContext) -> str:

@@ -78,6 +78,8 @@ def test_constant_signal_uses_smoothed_base_rate_at_observed_score():
         ([], []),
         ([0.1], [0, 1]),
         ([0.1, math.nan], [0, 1]),
+        pytest.param([0.1, 10**400], [0, 1], id="huge-positive-integer"),
+        pytest.param([0.1, -(10**400)], [0, 1], id="huge-negative-integer"),
         ([0.1, 0.9], [1, 1]),
         ([True, 0.9], [0, 1]),
         ([0.1, 0.9], [0, 0.5]),
@@ -88,7 +90,20 @@ def test_venn_invalid_training_values_are_rejected(scores, labels):
         VennAbersCalibrator.fit(scores, labels)
 
 
-@pytest.mark.parametrize("score", [True, None, "0.5", math.nan, math.inf, -0.1, 1.1])
+@pytest.mark.parametrize(
+    "score",
+    [
+        True,
+        None,
+        "0.5",
+        math.nan,
+        math.inf,
+        -0.1,
+        1.1,
+        pytest.param(10**400, id="huge-positive-integer"),
+        pytest.param(-(10**400), id="huge-negative-integer"),
+    ],
+)
 def test_venn_invalid_prediction_values_are_rejected(score):
     curve = VennAbersCalibrator.fit([0.1, 0.9], [0, 1])
     with pytest.raises(CalibrationError):
@@ -158,9 +173,15 @@ def test_auto_selects_per_metric_after_sparse_labels_and_holdout(scoring_backend
     assert len(scoring_backend.calls) == 200
 
 
-@pytest.mark.parametrize("algorithm", ["venn_abers", "isotonic"])
+@pytest.mark.parametrize(
+    "algorithm,expected",
+    [
+        ("venn_abers", [0.3, 9 / 22, 0.5, 13 / 22, 0.7]),
+        ("isotonic", [0.4, 0.4, 0.5, 0.6, 0.6]),
+    ],
+)
 def test_user_algorithm_override_and_roundtrip_preserve_predictions(
-    scoring_backend, tmp_path, algorithm
+    scoring_backend, tmp_path, algorithm, expected
 ):
     config = CalibrationConfig(
         enabled=True,
@@ -173,7 +194,11 @@ def test_user_algorithm_override_and_roundtrip_preserve_predictions(
     report = pipeline.fit(calibrated_rows(), validation_data=calibrated_rows("validation"))
     stats = report.metrics["answer_relevancy"]
     assert stats.algorithm == algorithm
-    assert stats.log_loss_improved == (stats.calibrated.log_loss < stats.raw.log_loss)
+    assert stats.raw.log_loss == pytest.approx(-0.4 * math.log(0.2) - 0.6 * math.log(0.8))
+    assert stats.calibrated.log_loss == pytest.approx(
+        -0.4 * math.log(1 - expected[3]) - 0.6 * math.log(expected[3])
+    )
+    assert stats.log_loss_improved is True
     path = tmp_path / "calibration.json"
     pipeline.save_calibration(path)
     payload = json.loads(path.read_text())
@@ -183,9 +208,17 @@ def test_user_algorithm_override_and_roundtrip_preserve_predictions(
         backend=scoring_backend, calibration=CalibrationConfig(enabled=True)
     )
     restored.load_calibration(path)
-    curve = pipeline.calibration_bundle.curves["answer_relevancy"]
-    sample = EvaluationSample(input="new-query", response="0.8")
-    assert restored.evaluate_one(sample).metrics["answer_relevancy"].score == curve.predict(0.8)
+    scores = [0, 0.2, 0.5, 0.8, 1]
+    result = restored.evaluate(
+        [
+            EvaluationSample(input=f"new-query-{index}", response=str(score))
+            for index, score in enumerate(scores)
+        ]
+    )
+    judgments = [row.metrics["answer_relevancy"] for row in result.results]
+    assert [metric.raw_score for metric in judgments] == scores
+    assert [metric.calibrated_probability for metric in judgments] == pytest.approx(expected)
+    assert [row.passed for row in result.results] == [False, False, True, True, True]
     assert restored.calibration_bundle == CalibrationBundle.load(path)
 
 

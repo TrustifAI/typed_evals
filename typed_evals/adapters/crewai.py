@@ -21,6 +21,7 @@ def guard_tool(
     policy: str,
     input: str | Callable[[Mapping[str, Any]], str],
     contexts: Sequence[str] | Callable[[Mapping[str, Any]], Sequence[str]],
+    authorization: Sequence[str] | Callable[[Mapping[str, Any]], Sequence[str]],
     threshold: float = 0.9,
     backend: Backend | None = None,
     on_fail: FailureAction = "block",
@@ -31,7 +32,8 @@ def guard_tool(
     """Decorate a Python function to produce a guarded native CrewAI Tool.
 
     Use this in place of crewai.tools.tool, then register the result with the agent.
-    input/contexts callbacks receive bound JSON arguments, including defaults.
+    input/contexts/authorization callbacks receive bound JSON arguments, including defaults.
+    Supply authenticated permission records in authorization, separate from contexts.
     Capture request-specific evidence in a tool factory; model-generated
     arguments are not authenticated runtime context.
 
@@ -68,6 +70,7 @@ def guard_tool(
             policy=policy,
             input=input,
             contexts=contexts,
+            authorization=authorization,
             threshold=threshold,
             backend=backend,
             on_fail=on_fail,

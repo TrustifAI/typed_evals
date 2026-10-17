@@ -10,7 +10,7 @@ from typed_evals._utils import digest
 from typed_evals.errors import CalibrationError
 
 if TYPE_CHECKING:
-    from typed_evals.backends.jev import Backend, Question
+    from typed_evals.backends.base import Backend, Question
 
 
 def backend_provenance(backend: Backend, questions: Mapping[str, Question]) -> dict[str, Any]:
@@ -19,7 +19,8 @@ def backend_provenance(backend: Backend, questions: Mapping[str, Question]) -> d
     Custom backends need only ``model`` and ``session()``. A backend may additionally
     provide ``calibration_provenance(questions)`` returning JSON-safe static settings.
     Its provider, backend, compiler version, and ordered question definitions identify
-    the score-producing configuration; evidence, credentials, and transport settings
+    the score-producing configuration, including the effective service endpoint.
+    Evidence, credentials, and operational settings such as timeouts and retries
     must not be included.
     """
     describe = getattr(backend, "calibration_provenance", None)

@@ -7,13 +7,14 @@ from typing import Any
 
 from typed_evals.backends import Backend
 from typed_evals.runtime.guards import FailureAction, _sync_mapper
-from typed_evals.runtime.tools import _contexts, _decorate_tool, _make_guard
+from typed_evals.runtime.tools import _authorization, _contexts, _decorate_tool, _make_guard
 
 
 def guard_tool(
     *,
     policy: str,
     contexts: Sequence[str] | Callable[[Any], Sequence[str]],
+    authorization: Sequence[str] | Callable[[Any], Sequence[str]],
     threshold: float = 0.9,
     backend: Backend | None = None,
     on_fail: FailureAction = "block",
@@ -24,13 +25,16 @@ def guard_tool(
     """Guard a LangChain tool declaring runtime: ToolRuntime.
 
     Captures the latest human text, tool call ID, name and bound JSON arguments.
-    contexts is application-owned evidence or a synchronous callback taking ToolRuntime.
+    contexts supplies tool specifications or facts; authorization supplies authenticated
+    application permission records. Both accept synchronous callbacks taking ToolRuntime.
     Runtime objects, state, config and credentials are never automatically sent to Jev.
     Match name to @tool(name) when registering under a different name.
     """
-    if callable(contexts):
-        _sync_mapper(contexts)
+    for value in (contexts, authorization):
+        if callable(value):
+            _sync_mapper(value)
     fixed_contexts = None if callable(contexts) else _contexts(contexts)
+    fixed_authorization = None if callable(authorization) else _authorization(authorization)
     guard = _make_guard(policy, threshold, backend, on_fail, on_error, timeout)
 
     def evidence(arguments):
@@ -39,6 +43,9 @@ def guard_tool(
             "input": _latest_request(runtime.state),
             "id": runtime.tool_call_id,
             "contexts": contexts(runtime) if callable(contexts) else fixed_contexts,
+            "authorization": authorization(runtime)
+            if callable(authorization)
+            else fixed_authorization,
         }
 
     def decorate(function):

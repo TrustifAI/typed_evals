@@ -41,7 +41,8 @@ def load_dataset(path: str | Path) -> list[EvaluationSample]:
         except ValidationError as exc:
             # Field locations only: validation errors can contain the user's raw text.
             fields = [".".join(str(part) for part in error["loc"]) for error in exc.errors()]
-            raise ValueError(f"Invalid evaluation row {index}, fields: {fields}") from exc
+            # Suppress the original error in formatted tracebacks as well as the message.
+            raise ValueError(f"Invalid evaluation row {index}, fields: {fields}") from None
     return rows
 
 
@@ -52,5 +53,6 @@ def load_calibration_dataset(path: str | Path) -> list[CalibrationExample]:
             rows.append(CalibrationExample.model_validate(data))
         except ValidationError as exc:
             fields = [".".join(str(part) for part in error["loc"]) for error in exc.errors()]
-            raise ValueError(f"Invalid calibration row {index}, fields: {fields}") from exc
+            # Chained Pydantic errors would expose raw calibration row values.
+            raise ValueError(f"Invalid calibration row {index}, fields: {fields}") from None
     return rows
